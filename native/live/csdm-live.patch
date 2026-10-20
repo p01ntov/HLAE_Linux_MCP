@@ -1,0 +1,122 @@
+--- a/cs2-server-plugin/cs2-server-plugin/main.cpp
++++ b/cs2-server-plugin/cs2-server-plugin/main.cpp
+@@ -12,6 +12,7 @@
+ #include "cdll_interfaces.h"
+ #include "motion_track.h"
+ #include "linux_view_patch.h"
++#include "live_controller.h"
+ #ifdef _WIN32
+ #define SERVER_LIB_PATH "\\csgo\\bin\\win64\\server.dll"
+ #else
+@@ -92,6 +93,14 @@
+ std::queue<Sequence> sequences;
+ cs2_mvp::MotionTrack motionTrack;
+ cs2_mvp::LinuxViewPatch viewPatch;
++cs2_live::Controller liveController;
++
++extern "C" __attribute__((visibility("default"))) const char* cs2_live_state_json() {
++    static thread_local std::string state; state=liveController.StateJson(); return state.c_str();
++}
++extern "C" __attribute__((visibility("default"))) void cs2_live_command_json(const char* command) {
++    liveController.EnqueueText(command);
++}
+ size_t viewWrites = 0;
+ size_t fovWrites = 0;
+ double lastFov = 0;
+@@ -322,6 +331,8 @@
+ }
+ 
+ void LoadSequencesFile(string demoPath) {
++    // Live sessions never consume batch actions (including any scheduled quit).
++    if (liveController.Enabled()) return;
+     std::lock_guard<std::mutex> lock(sequencesMutex);
+     sequences = {};
+     EndCameraTrack(currentTick.load(), "load_demo");
+@@ -378,6 +389,15 @@
+ bool OverrideDemoView(void* view) {
+     auto engine = GetEngine();
+     const bool demo = engine != NULL && engine->IsPlayingDemo();
++    if (liveController.Enabled()) {
++        if (demo && !isQuitting) {
++            auto* bytes=static_cast<unsigned char*>(view);
++            liveController.View(reinterpret_cast<float*>(bytes+cs2_mvp::LinuxViewPatch::Origin),
++                reinterpret_cast<float*>(bytes+cs2_mvp::LinuxViewPatch::Angles),
++                reinterpret_cast<float*>(bytes+cs2_mvp::LinuxViewPatch::Fov),demo);
++        }
++        return demo;
++    }
+     if (viewOwnerThread.load() != 0 && viewOwnerThread.load() != gettid()) {
+         if (!viewFault.exchange(true)) Log("CS2_MVP_CAMERA_ERROR main view runs on another thread");
+         return demo;
+@@ -435,6 +455,40 @@
+     if (engine == NULL) {
+         Log("Engine interface not found");
+         originalFrameStageNotify(thisptr, stage);
++        return;
++    }
++
++    // Service the editor even while paused or outside a demo. All engine calls
++    // and project mutations stay on this thread. Batch rendering is bypassed.
++    if (liveController.Enabled()) {
++        const bool playing=engine->IsPlayingDemo();
++        auto player=playing?engine->GetDemoPlayer():nullptr;
++        static std::string liveHookError;
++        static bool attemptedViewHook=false;
++        static bool configuredDemo=false;
++        if (playing && !attemptedViewHook) {
++            attemptedViewHook=true;
++            const char* error=viewPatch.Install(reinterpret_cast<void*>(&OverrideDemoView));
++            liveHookError=error?error:"";
++            Log("CS2_CAMERA_LIVE_VIEW installed=%d error=%s",viewPatch.Installed(),liveHookError.c_str());
++        }
++        if (playing && !configuredDemo) {
++            engine->ExecuteClientCmd(0,"sv_cheats 1",true);
++            configuredDemo=true;
++        }
++        if (!playing) configuredDemo=false;
++        double tickRate=64;
++        if (player) { const float interval=player->TicksToTime(1); if(interval>0 && std::isfinite(interval)) tickRate=1.0/interval; }
++        liveController.Frame(playing,player?player->GetDemoTick():0,player && player->IsPlaybackPaused(),
++            tickRate,viewPatch.Installed(),liveHookError,
++            [engine](const std::string& command){engine->ExecuteClientCmd(0,command.c_str(),true);});
++        // Preserve the upstream offline-Steam +playdemo fallback in live mode.
++        if (demoPath && !playing && std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now()-startTime).count()>=8) {
++            const std::string command="playdemo \""+std::string(demoPath)+"\"";
++            demoPath=nullptr;
++            engine->ExecuteClientCmd(0,command.c_str(),true);
++        }
++        originalFrameStageNotify(thisptr,stage);
+         return;
+     }
+ 
+@@ -704,7 +758,12 @@
+     UnhideCommandsAndCvars();
+     ConVar_Register();
+ 
+-    wsConnectionThread = new std::thread(ConnectToWebsocketServerLoop);
++    if (liveController.Enabled()) {
++        liveController.Start();
++        Log("CS2_CAMERA_LIVE_ABI 1");
++    } else {
++        wsConnectionThread = new std::thread(ConnectToWebsocketServerLoop);
++    }
+ 
+     RestoreGameinfoFile();
+ 
+@@ -715,6 +774,7 @@
+ void Shutdown()
+ {
+     isQuitting = true;
++    liveController.Stop();
+     if (!viewPatch.Remove()) Log("CS2_MVP_CAMERA_ERROR could not restore main-view code");
+ 
+     if (serverConfigShutdown != NULL) {
+@@ -776,7 +836,7 @@
+     originalClientFullyConnect(thisptr, playerSlot);
+ }
+ 
+-EXPORT void* CreateInterface(const char* pName, int* pReturnCode)
++extern "C" __attribute__((visibility("default"))) void* CreateInterface(const char* pName, int* pReturnCode)
+ {
+     if (shouldDeleteLogFile) {
+         DeleteLogFile();

@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "type": "keyframes",
+  "position": [-250, -1900, 230],
+  "rotation_easing": "smoothstep",
+  "rotation_keys": [
+    {"time": 0, "angles": [24, 58, 0]},
+    {"time": 3.140625, "angles": [24, -5, 0]}
+  ],
+  "floor_z": 0,
+  "clearance": 96
+}

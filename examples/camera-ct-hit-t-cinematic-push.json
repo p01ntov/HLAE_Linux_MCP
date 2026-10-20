@@ -1,0 +1,138 @@
+{
+  "version": 1,
+  "type": "keyframes",
+  "hold_last": true,
+  "position_easing": "smoothstep",
+  "position_keys": [
+    {
+      "time": 0,
+      "position": [
+        -280,
+        -1700,
+        230
+      ]
+    },
+    {
+      "time": 3,
+      "position": [
+        -180,
+        -2100,
+        230
+      ]
+    },
+    {
+      "time": 3.875,
+      "position": [
+        160,
+        -2220,
+        200
+      ]
+    },
+    {
+      "time": 6,
+      "position": [
+        550,
+        -2120,
+        -120
+      ]
+    }
+  ],
+  "rotation_easing": "smoothstep",
+  "rotation_keys": [
+    {
+      "time": 0,
+      "angles": [
+        32.50551394302383,
+        41.977589422424934,
+        0
+      ]
+    },
+    {
+      "time": 1.5,
+      "angles": [
+        18.905322875270045,
+        42.547295020564945,
+        0
+      ]
+    },
+    {
+      "time": 3,
+      "angles": [
+        24.350583307735107,
+        28.38955576647771,
+        0
+      ]
+    },
+    {
+      "time": 3.875,
+      "angles": [
+        37.95724200062418,
+        31.759480084812793,
+        0
+      ]
+    },
+    {
+      "time": 6,
+      "angles": [
+        34.42616604808619,
+        50.38931175997341,
+        0
+      ]
+    }
+  ],
+  "floor_z": -408,
+  "clearance": 96,
+  "shot_markers": [
+    {
+      "time": 0,
+      "tick": 80091,
+      "interest_point": [
+        49,
+        -1404,
+        -52
+      ],
+      "label": "CT approach"
+    },
+    {
+      "time": 1.5,
+      "tick": 80187,
+      "interest_point": [
+        105.851768,
+        -1591.738159,
+        73.871875
+      ],
+      "label": "fixed mid-jump framing key for the close lens"
+    },
+    {
+      "time": 3,
+      "tick": 80283,
+      "interest_point": [
+        166,
+        -1913,
+        52
+      ],
+      "label": "AWP hit at T"
+    },
+    {
+      "time": 3.875,
+      "tick": 80339,
+      "interest_point": [
+        790,
+        -1830,
+        -378
+      ],
+      "label": "reveal dead T at garage; independent world camera"
+    },
+    {
+      "time": 6,
+      "tick": 80475,
+      "interest_point": [
+        790,
+        -1830,
+        -378
+      ],
+      "label": "finish the elevated push-in; hold until 7 seconds; ignore falling CT"
+    }
+  ],
+  "fov": 35
+}

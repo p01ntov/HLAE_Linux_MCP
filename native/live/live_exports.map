@@ -1,0 +1,8 @@
+{
+    global:
+        CreateInterface;
+        cs2_live_state_json;
+        cs2_live_command_json;
+    local:
+        *;
+};

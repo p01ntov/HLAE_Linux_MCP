@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "first": {"min": [-16, -16, 0], "max": [16, 16, 72]},
+  "second": {"min": [496, -16, 0], "max": [528, 16, 72]},
+  "horizontal_fov": 90,
+  "aspect_ratio": 1.7777777777777777,
+  "margin": 0.1,
+  "side_angle": 35,
+  "elevation": 25,
+  "height_above_models": 96
+}

@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "cs2-camera-studio": {
+      "command": "/absolute/path/CS2-Camera-Studio-x86_64.AppImage",
+      "args": ["--mcp"],
+      "env": {"APPIMAGE_EXTRACT_AND_RUN": "1"}
+    }
+  }
+}

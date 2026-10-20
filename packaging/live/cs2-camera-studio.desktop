@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=CS2 Camera Studio
+Comment=Live cinematic camera editor for local CS2 demos
+Exec=cs2-camera-studio
+Icon=cs2-camera-studio
+Terminal=false
+Categories=AudioVideo;Video;
+StartupWMClass=CS2 Camera Studio

@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "type": "static",
+  "position": [500, -2250, 450],
+  "look_at": {"point": [140, -1790, 0]},
+  "floor_z": 0,
+  "clearance": 200
+}

@@ -1,0 +1,16 @@
+{
+  "version": 2,
+  "transport": "chat_sse",
+  "endpoint": "https://kube943.prod.tonworld.ru/v1",
+  "open_timeout_seconds": 20,
+  "event_timeout_seconds": 600,
+  "job_timeout_seconds": 1200,
+  "ping_interval_seconds": 15,
+  "ping_timeout_seconds": 30,
+  "context_limit_bytes": 8192,
+  "automatic_retries": 0,
+  "models": {
+    "gpt-6-astra": {"effort": "xhigh", "max_output_tokens": 4096},
+    "gpt-6.1-sol": {"effort": "max", "max_output_tokens": 4096}
+  }
+}

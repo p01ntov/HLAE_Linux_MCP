@@ -1,0 +1,16 @@
+{
+    global:
+        vkNegotiateLoaderLayerInterfaceVersion;
+        CameraGetInstanceProcAddr;
+        CameraGetDeviceProcAddr;
+        dlsym;
+        SDL_SetWindowRelativeMouseMode;
+        SDL_SetWindowMouseGrab;
+        SDL_HideCursor;
+        SDL_WarpMouseInWindow;
+        SDL_WarpMouseGlobal;
+        SDL_GetRelativeMouseState;
+        SDL_GetMouseState;
+        SDL_GetKeyboardState;
+    local: *;
+};

@@ -1,0 +1,24 @@
+{
+  "name": "Nuke courtyard flyby",
+  "start_tick": 80091,
+  "duration": 3.140625,
+  "interpolation": "smooth",
+  "keys": [
+    {
+      "id": "nuke-start",
+      "time": 0,
+      "position": [-280, -1700, 230],
+      "angles": [26, 45, 0],
+      "fov": 90,
+      "easing": [0.42, 0, 0.58, 1]
+    },
+    {
+      "id": "nuke-end",
+      "time": 3.140625,
+      "position": [-320, -1950, 260],
+      "angles": [25, -3, 0],
+      "fov": 90,
+      "easing": [0, 0, 1, 1]
+    }
+  ]
+}

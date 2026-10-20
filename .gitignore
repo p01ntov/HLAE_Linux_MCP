@@ -1,0 +1,17 @@
+.venv/
+.cache/
+.runs/
+outputs/
+references/
+__pycache__/
+*.py[cod]
+*.egg-info/
+imgui.ini
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.AppImage
+core
+core.[0-9]*

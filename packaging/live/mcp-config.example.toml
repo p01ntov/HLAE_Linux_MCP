@@ -1,0 +1,7 @@
+# Copy this block into the MCP client's TOML configuration and set the real path.
+[mcp_servers.cs2_camera_studio]
+command = "/absolute/path/CS2-Camera-Studio-x86_64.AppImage"
+args = ["--mcp"]
+
+[mcp_servers.cs2_camera_studio.env]
+APPIMAGE_EXTRACT_AND_RUN = "1"

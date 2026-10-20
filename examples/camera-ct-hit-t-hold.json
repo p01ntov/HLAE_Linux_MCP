@@ -1,0 +1,94 @@
+{
+  "version": 1,
+  "type": "keyframes",
+  "hold_last": true,
+  "position_easing": "smoothstep",
+  "position_keys": [
+    {
+      "time": 0,
+      "position": [
+        -280,
+        -1700,
+        230
+      ]
+    },
+    {
+      "time": 3,
+      "position": [
+        -180,
+        -2100,
+        230
+      ]
+    },
+    {
+      "time": 3.875,
+      "position": [
+        160,
+        -2220,
+        200
+      ]
+    }
+  ],
+  "rotation_easing": "smoothstep",
+  "rotation_keys": [
+    {
+      "time": 0,
+      "angles": [
+        32.50551394302383,
+        41.977589422424934,
+        0
+      ]
+    },
+    {
+      "time": 3,
+      "angles": [
+        24.350583307735107,
+        28.38955576647771,
+        0
+      ]
+    },
+    {
+      "time": 3.875,
+      "angles": [
+        42.46686416371571,
+        36.63958190008121,
+        0
+      ]
+    }
+  ],
+  "fov": 105,
+  "floor_z": 0,
+  "clearance": 96,
+  "shot_markers": [
+    {
+      "time": 0,
+      "tick": 80091,
+      "interest_point": [
+        49,
+        -1404,
+        -52
+      ],
+      "label": "CT approach"
+    },
+    {
+      "time": 3,
+      "tick": 80283,
+      "interest_point": [
+        166,
+        -1913,
+        52
+      ],
+      "label": "AWP hit at T"
+    },
+    {
+      "time": 3.875,
+      "tick": 80339,
+      "interest_point": [
+        679,
+        -1834,
+        -392
+      ],
+      "label": "hold T impact area; ignore CT fall"
+    }
+  ]
+}
