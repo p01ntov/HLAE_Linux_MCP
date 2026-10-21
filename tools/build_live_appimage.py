@@ -96,7 +96,7 @@ def prepare_capture_assets(cache: Path) -> Path:
     require_native(capture)
     manifest = json.loads((source / "build.json").read_text())
     if (manifest.get("motion_abi") != 3 or manifest.get("sha256") != sha256(capture)
-            or b"CS2_MVP_MOTION_ABI 3" not in capture.read_bytes()):
+            or b"CS2_MVP_MOTION_ABI 3" not in capture.read_bytes() or b"CS2_MVP_ENVIRONMENT_ABI 1" not in capture.read_bytes()):
         raise RuntimeError("Build and verify the ABI 3 capture plugin before packaging")
     commit = "7270bc95c8cab87b7f9ddd490fea13c6eda3ace7"
     stock = ROOT / ".cache/csdm" / commit / "libserver.so"
@@ -108,7 +108,7 @@ def prepare_capture_assets(cache: Path) -> Path:
     assets.mkdir(parents=True, exist_ok=True)
     shutil.copy2(capture, assets / "libcamera_capture.so")
     shutil.copy2(stock, assets / "libserver_stock.so")
-    value = {"version": 1, "motion_abi": 3, "upstream_commit": commit,
+    value = {"version": 1, "motion_abi": 3, "environment_abi": 1, "upstream_commit": commit,
              "dependencies": manifest["dependencies"], "capture_sha256": sha256(capture),
              "stock_sha256": stock_hash, "source_fingerprint": manifest["source_fingerprint"]}
     (assets / "plugins.json").write_text(json.dumps(value, indent=2) + "\n")
@@ -138,6 +138,7 @@ def build(plugin: Path, overlay: Path, output: Path, *, appdir_only=False) -> Pa
          "--add-data", f"{manifest.resolve()}:native/live",
          "--add-data", f"{ROOT / 'packaging/live/fonts/NotoSans-Regular.ttf'}:native/live",
          "--add-data", f"{capture_assets}:native/capture",
+         "--add-data", f"{ROOT / 'docs/mcp-agent-guide.md'}:docs",
          ROOT / "packaging/live/entry.py"], cwd=ROOT)
     if appdir.exists():
         shutil.rmtree(appdir)
@@ -163,6 +164,7 @@ def build(plugin: Path, overlay: Path, output: Path, *, appdir_only=False) -> Pa
     shutil.copy2(ROOT / "docs/live-editor.md", share / "README.md")
     shutil.copy2(ROOT / "examples/live-nuke-flyby.json", share)
     shutil.copy2(ROOT / "docs/high-fps-capture.md", share)
+    shutil.copy2(ROOT / "docs/mcp-agent-guide.md", share)
     shutil.copy2(ROOT / "examples/high-fps-probe-camera.json", share)
     shutil.copy2(ROOT / "examples/live-high-fps-probe.json", share)
     copy_licenses(share / "licenses")
@@ -173,7 +175,7 @@ def build(plugin: Path, overlay: Path, output: Path, *, appdir_only=False) -> Pa
     environment = dict(os.environ, ARCH="x86_64", APPIMAGE_EXTRACT_AND_RUN="1")
     run([appimagetool, "--no-appstream", appdir, output.resolve()], env=environment)
     output.chmod(0o755)
-    metadata = {"version": "0.1.0", "appimage": str(output.resolve()), "sha256": sha256(output),
+    metadata = {"version": "0.1.1", "appimage": str(output.resolve()), "sha256": sha256(output),
                 "plugin_sha256": sha256(plugin), "overlay_sha256": sha256(overlay),
                 "capture_plugin_sha256": sha256(capture_assets / "libcamera_capture.so"),
                 "stock_plugin_sha256": sha256(capture_assets / "libserver_stock.so"),

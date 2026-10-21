@@ -16,8 +16,8 @@ class BundledCaptureTests(unittest.TestCase):
         native = root / "native/capture"
         native.mkdir(parents=True)
         plugin = native / "libcamera_capture.so"
-        plugin.write_bytes(b"\x7fELF\x02\x01" + b"CS2_MVP_MOTION_ABI 3")
-        manifest = {"version": 1, "motion_abi": 3, "upstream_commit": discovery.CSDM_COMMIT,
+        plugin.write_bytes(b"\x7fELF\x02\x01" + b"CS2_MVP_MOTION_ABI 3 CS2_MVP_ENVIRONMENT_ABI 1")
+        manifest = {"version": 1, "motion_abi": 3, "environment_abi": 1, "upstream_commit": discovery.CSDM_COMMIT,
                     "capture_sha256": discovery.sha256(plugin),
                     "dependencies": {"easywsclient": "afc1d8cfc584e0f1f4a77e8c0ce3e979d9fe7ce2",
                                      "hl2sdk": "dc8e7324b1e7f3cb115b1a861280a30ba5ce72a2",
@@ -65,6 +65,19 @@ class BundledCaptureTests(unittest.TestCase):
         self.assertEqual(environment["VK_INSTANCE_LAYERS"], "VK_LAYER_USER_overlay")
         for name in ("PYTHONHOME", "QT_PLUGIN_PATH", "CS2_CAMERA_LIVE", "CS2_CAMERA_SOCKET", "_PYI_APPLICATION_HOME_DIR"):
             self.assertNotIn(name, environment)
+
+    def test_source_capture_also_removes_only_this_apps_inherited_injection(self):
+        inherited={"LD_LIBRARY_PATH":"/host/lib", "LD_PRELOAD":"/session/libcs2_camera_overlay.so:/user/other.so",
+                   "VK_INSTANCE_LAYERS":"VK_LAYER_CS2_camera:VK_LAYER_USER_overlay", "CS2_CAMERA_LIVE":"1",
+                   "CS2_CAMERA_SOCKET":"/session/control.sock", "CS2_CAMERA_OVERLAY":"1", "CS2_CAMERA_PROJECT":"/session/project.json",
+                   "CS2_CAMERA_COSMETICS_CATALOG":"/session/catalog.json", "CS2_CAMERA_COSMETICS_CATALOG_ERROR":"old error",
+                   "CS2_CAMERA_CAPTURE_COSMETICS":"1"}
+        with patch.object(sys,"frozen",False,create=True),patch.dict(os.environ,inherited,clear=True):
+            environment=discovery.external_environment()
+        self.assertEqual(environment["LD_LIBRARY_PATH"],"/host/lib")
+        self.assertEqual(environment["LD_PRELOAD"],"/user/other.so")
+        self.assertEqual(environment["VK_INSTANCE_LAYERS"],"VK_LAYER_USER_overlay")
+        self.assertFalse(any(name.startswith("CS2_CAMERA_") for name in environment))
 
     def test_packaged_render_obeys_live_session_lock(self):
         with tempfile.TemporaryDirectory() as directory:

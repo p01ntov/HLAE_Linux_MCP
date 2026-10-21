@@ -31,6 +31,9 @@ class EditorUi {
   // Per-frame host texture of the blurred game scene, sampled in screen space.
   ImTextureID backdrop_texture = 0;
   bool shortcuts_visible = false;
+  // The host reads the private installed-game catalog once, outside rendering.
+  Json cosmetics_catalog;
+  std::string cosmetics_catalog_error;
 
   void Draw(const Json& state, const Send& send) {
     if (!visible || !ImGui::GetCurrentContext()) return;
@@ -38,6 +41,7 @@ class EditorUi {
     if (last_draw_frame_ >= 0 && frame != last_draw_frame_ + 1) {
       timeline_active_ = false;
       timeline_drag_id_.clear();
+      range_drag_handle_ = -1;
       graph_handle_ = -1;
       graph_changed_ = false;
       was_item_active_ = false;
@@ -89,14 +93,48 @@ class EditorUi {
   bool connected_ = false, demo_ = false, paused_ = false, playing_ = false;
   bool sync_demo_ = true, was_item_active_ = false, inspect_key_ = false;
   bool show_inspector_ = true;
+  bool general_panel_ = false;
   bool shortcuts_focus_requested_ = false;
   int tick_ = 0, tick_rate_ = 64, revision_ = 0, last_draw_frame_ = -1;
   float cursor_ = 0, duration_ = 8, draft_duration_ = 8;
+  double exact_duration_ = 8;
+  bool render_region_ = false;
+  double range_in_ = 0, range_out_ = 8, draft_range_in_ = 0, draft_range_out_ = 8;
+  int range_drag_handle_ = -1;
+  double range_drag_time_ = 0, range_drag_initial_ = 0;
+  float range_drag_start_x_ = 0;
+  bool range_drag_moved_ = false;
   int start_tick_ = 0, draft_start_tick_ = 0;
   std::string mode_, project_name_, interpolation_, error_, selected_id_, draft_target_;
   char draft_name_[128] = {};
   Key camera_, draft_;
   Json hotkeys_;
+  Json scene_capabilities_;
+  Json presentation_;
+  Json appearance_;
+  Json appearance_capabilities_;
+  Json cosmetics_;
+  Json weapon_cosmetics_;
+  Json glove_cosmetics_;
+  std::string cosmetic_player_;
+  int cosmetic_category_ = 0, cosmetic_agent_ = 0;
+  int cosmetic_seen_revision_ = -1;
+  std::string cosmetic_draft_target_;
+  char cosmetic_filter_[128] = {};
+  int cosmetic_weapon_ = 0, cosmetic_paint_ = 0, cosmetic_seed_ = 0;
+  float cosmetic_wear_ = .01f;
+  std::string weapon_draft_target_, weapon_draft_native_;
+  char paint_filter_[128] = {};
+  int glove_item_ = 0, glove_paint_ = 0, glove_seed_ = 0;
+  float glove_wear_ = .01f;
+  std::string glove_draft_target_, glove_draft_native_;
+  bool glove_draft_dirty_ = false;
+  char glove_filter_[128] = {};
+  bool palette_enabled_ = false;
+  std::array<float, 3> palette_t_{{1, .25f, .25f}}, palette_ct_{{.25f, .5f, 1}};
+  char appearance_path_[4096] = {};
+  char appearance_models_[4096] = {};
+  std::unordered_map<std::string, double> scene_drafts_;
   std::vector<Key> keys_;
   std::vector<std::string> capture_ids_;
   bool capture_pending_ = false;
@@ -141,6 +179,11 @@ class EditorUi {
         number > std::numeric_limits<int>::max()) return fallback;
     return static_cast<int>(number);
   }
+  static double ExactNumber(const Json& value, double fallback = 0) {
+    if (!value.is_number()) return fallback;
+    const double number = value.get<double>();
+    return std::isfinite(number) ? number : fallback;
+  }
   static bool Boolean(const Json& value, bool fallback = false) {
     return value.is_boolean() ? value.get<bool>() : fallback;
   }
@@ -178,6 +221,7 @@ class EditorUi {
     numeric_edits_.clear();
     selected_id_ = id;
     inspect_key_ = true;
+    general_panel_ = false;
     show_inspector_ = true;
     draft_target_.clear();
     graph_handle_ = -1;
@@ -199,12 +243,24 @@ class EditorUi {
     mode_ = String(Member(state, "mode"), "free");
     error_ = String(Member(state, "error"));
     hotkeys_ = Member(state, "hotkeys");
+    scene_capabilities_ = Member(state, "scene_capabilities");
+    presentation_ = Member(state, "presentation");
+    appearance_ = Member(state, "appearance");
+    appearance_capabilities_ = Member(state, "appearance_capabilities");
+    cosmetics_ = Member(state, "cosmetics");
+    weapon_cosmetics_ = Member(state, "weapon_cosmetics");
+    glove_cosmetics_ = Member(state, "glove_cosmetics");
     camera_ = ReadKey(Member(state, "camera"));
     const Json& project = Member(state, "project");
     project_name_ = String(Member(project, "name"), "Untitled shot");
     interpolation_ = String(Member(project, "interpolation"), "smooth");
-    duration_ = std::max(.01f, Number(Member(project, "duration"), 8));
+    exact_duration_ = std::max(.01, ExactNumber(Member(project, "duration"), 8));
+    duration_ = static_cast<float>(exact_duration_);
     start_tick_ = Integer(Member(project, "start_tick"));
+    const Json& range = Member(project, "render_range");
+    render_region_ = String(Member(range, "mode"), "composition") == "region";
+    range_in_ = std::clamp(ExactNumber(Member(range, "in")), 0.0, exact_duration_);
+    range_out_ = std::clamp(ExactNumber(Member(range, "out"), exact_duration_), range_in_, exact_duration_);
     keys_.clear();
     const Json& keys = Member(project, "keys");
     if (keys.is_array()) {
@@ -256,6 +312,20 @@ class EditorUi {
       std::snprintf(draft_name_, sizeof(draft_name_), "%s", project_name_.c_str());
       draft_start_tick_ = start_tick_;
       draft_duration_ = duration_;
+      draft_range_in_ = range_in_;
+      draft_range_out_ = range_out_;
+      if (scene_capabilities_.is_object()) {
+        for (auto entry = scene_capabilities_.begin(); entry != scene_capabilities_.end(); ++entry)
+          scene_drafts_[entry.key()] = ExactNumber(Member(entry.value(), "value"));
+      }
+      const Json& palette = Member(cosmetics_, "team_palette");
+      palette_enabled_ = Boolean(Member(palette, "enabled"));
+      const auto t = Array<3>(Member(palette, "t"), {{255, 64, 64}});
+      const auto ct = Array<3>(Member(palette, "ct"), {{64, 128, 255}});
+      for (size_t i = 0; i < 3; ++i) {
+        palette_t_[i] = Clamp(t[i] / 255.f, 0, 1);
+        palette_ct_[i] = Clamp(ct[i] / 255.f, 0, 1);
+      }
     }
   }
   void Emit(const Send& send, const char* command, const Json& args = Json::object()) {
@@ -290,9 +360,602 @@ class EditorUi {
       if (demo_ && !playing_ && std::abs(cursor_ - Selected()->time) < .5f / tick_rate_)
         Emit(send, "scrub", {{"time", Selected()->time}, {"seek_demo", false}});
     } else {
-      Emit(send, "set_camera", {{"position", draft_.position},
-                                {"angles", draft_.angles}, {"fov", draft_.fov}});
+      // Patch only the edited property: the roaming camera may have moved
+      // since numeric editing began, and a lens edit must not move it back.
+      Emit(send, "set_camera", {{field, value}});
     }
+  }
+  double RangeSpan() const { return std::min(.01, std::max(1e-12, range_out_ - range_in_)); }
+  void SetRangeBoundary(const Send& send, bool end) {
+    const double span = RangeSpan();
+    const double time = std::clamp(static_cast<double>(cursor_), end ? span : 0.0,
+                                   end ? exact_duration_ : exact_duration_ - span);
+    Json range = {{"mode", "region"}};
+    if (end) {
+      range["out"] = time;
+      range["in"] = std::min(range_in_, time - span);
+    } else {
+      range["in"] = time;
+      range["out"] = std::max(range_out_, time + span);
+    }
+    Emit(send, "set_project", {{"render_range", range}});
+  }
+  void DrawRenderScope(const Send& send, float width) {
+    ImGui::SetNextItemWidth(width);
+    if (ImGui::BeginCombo("##render_scope", render_region_ ? "Render region" : "Whole composition")) {
+      DrawBackdrop();
+      if (ImGui::Selectable("Whole composition", !render_region_) && render_region_)
+        Emit(send, "set_project", {{"render_range", {{"mode", "composition"}}}});
+      if (ImGui::Selectable("Render region", render_region_) && !render_region_)
+        Emit(send, "set_project", {{"render_range", {{"mode", "region"}}}});
+      ImGui::EndCombo();
+    }
+    Tip("Preview and render the whole composition or the saved In/Out region. Switching keeps both boundaries and all camera keys.");
+  }
+  void DrawRenderRange(const Send& send) {
+    Caption("Preview / render range");
+    DrawRenderScope(send, -1);
+    const float half = (ImGui::GetContentRegionAvail().x - S(7)) / 2;
+    const float second_column = ImGui::GetCursorPosX() + half + S(7);
+    Caption("In");
+    ImGui::SameLine(second_column);
+    Caption("Out");
+    ImGui::SetNextItemWidth(half);
+    if (NumericField("##range_in", &draft_range_in_, 0, range_out_ - RangeSpan(), "%.3f s"))
+      Emit(send, "set_project", {{"render_range", {{"in", draft_range_in_}}}});
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(half);
+    if (NumericField("##range_out", &draft_range_out_, range_in_ + RangeSpan(), exact_duration_, "%.3f s"))
+      Emit(send, "set_project", {{"render_range", {{"out", draft_range_out_}}}});
+    if (ImGui::Button("Set In  [I]", ImVec2(half, 0))) SetRangeBoundary(send, false);
+    ImGui::SameLine();
+    if (ImGui::Button("Set Out  [O]", ImVec2(half, 0))) SetRangeBoundary(send, true);
+    if (ImGui::Button("Reset region", ImVec2(-1, 0)))
+      Emit(send, "set_project", {{"render_range", {{"in", 0}, {"out", exact_duration_}}}});
+    Tip("Restore In/Out to the full duration. Ctrl+Z restores the previous region.");
+  }
+  void DrawSceneSettings(const Send& send) {
+    if (!scene_capabilities_.is_object() || scene_capabilities_.empty()) return;
+    if (!ImGui::CollapsingHeader("Scene settings")) return;
+    ImGui::BeginDisabled(!demo_);
+    if (ImGui::Button("Clean frame", ImVec2(-1, 0))) {
+      Json settings = Json::object();
+      for (const char* id : {"hud_visible", "viewmodel_visible", "fps_counter_visible",
+                              "trueview_status_visible", "telemetry_frametime_visible",
+                              "telemetry_network_visible", "telemetry_ping_visible",
+                              "telemetry_margin_visible", "build_info_visible"})
+        if (Boolean(Member(Member(scene_capabilities_, id), "available"))) settings[id] = false;
+      if (!settings.empty()) Emit(send, "set_scene", {{"settings", settings}});
+      visible = false;
+    }
+    ImGui::EndDisabled();
+    Tip("Hide the game HUD, viewmodel and editor. F8 brings the editor back; Reset scene settings restores the game display.");
+    const auto group_for = [&](const std::string& id, const Json& capability) {
+      if (id == "hud_visible" && presentation_.is_object()) return std::string();
+      if (id == "fps_counter_visible" || id == "trueview_status_visible" ||
+          id == "build_info_visible" || id.rfind("telemetry_", 0) == 0) return std::string("Diagnostics");
+      return String(Member(capability, "group"));
+    };
+    const char* groups[] = {"Lens", "Lighting", "Post processing", "Environment", "Diagnostics"};
+    for (const char* group : groups) {
+      bool present = false;
+      for (auto item = scene_capabilities_.begin(); item != scene_capabilities_.end(); ++item)
+        if (group_for(item.key(), item.value()) == group && Boolean(Member(item.value(), "available"))) present = true;
+      if (!present) continue;
+      if (!ImGui::TreeNode(group)) continue;
+      for (auto entry = scene_capabilities_.begin(); entry != scene_capabilities_.end(); ++entry) {
+        const Json& capability = entry.value();
+        if (group_for(entry.key(), capability) != group || !Boolean(Member(capability, "available"))) continue;
+        const bool available = Boolean(Member(capability, "available"));
+        const std::string label = String(Member(capability, "label"), entry.key().c_str());
+        ImGui::PushID(entry.key().c_str());
+        ImGui::BeginDisabled(!demo_ || !available);
+        if (String(Member(capability, "type")) == "boolean") {
+          bool enabled = Boolean(Member(capability, "value"));
+          if (ImGui::Checkbox(label.c_str(), &enabled))
+            Emit(send, "set_scene", {{"settings", {{entry.key(), enabled}}}});
+        } else {
+          Caption(label.c_str());
+          ImGui::SetNextItemWidth(-1);
+          double& value = scene_drafts_[entry.key()];
+          const double minimum = ExactNumber(Member(capability, "minimum"), -100000);
+          const double maximum = ExactNumber(Member(capability, "maximum"), 100000);
+          if (NumericField("##scene_value", &value, minimum, maximum, "%.3f"))
+            Emit(send, "set_scene", {{"settings", {{entry.key(), value}}}});
+        }
+        ImGui::EndDisabled();
+        const std::string help = String(Member(capability, available ? "help" : "reason"));
+        if (!help.empty()) Tip(help.c_str());
+        ImGui::PopID();
+      }
+      ImGui::TreePop();
+    }
+    DrawTeamPalette(send);
+    if (ImGui::Button("Reset scene settings", ImVec2(-1, 0))) Emit(send, "reset_scene");
+    Tip("Restore the engine values from the start of this session. Ctrl+Z restores project overrides.");
+    ImGui::Separator();
+  }
+  void DrawPresentation(const Send& send) {
+    if (!presentation_.is_object()) return;
+    const Json& capabilities = Member(presentation_, "capabilities");
+    const std::string actual_view = String(Member(presentation_, "view"));
+    std::string view = String(Member(presentation_, "requested_view"), actual_view.c_str());
+    if (view != "player" && view != "free") view = actual_view;
+    const std::string actual_hud = String(Member(presentation_, "hud"));
+    std::string hud = String(Member(presentation_, "requested_hud"), actual_hud.c_str());
+    if (hud != "gameplay" && hud != "demo" && hud != "hidden") hud = "demo";
+    auto requestable = [&](const char* id) {
+      const auto& capability = Member(capabilities, id);
+      return Boolean(Member(capability, "requestable"), Boolean(Member(capability, "available")));
+    };
+    auto option = [&](const char* id, const char* label, bool selected, const Json& args) {
+      ImGui::BeginDisabled(!demo_ || !requestable(id));
+      if (ImGui::Selectable(label, selected)) Emit(send, "set_presentation", args);
+      ImGui::EndDisabled();
+      const auto reason = String(Member(Member(capabilities, id), "reason"));
+      if (!requestable(id) && !reason.empty()) Tip(reason.c_str());
+    };
+    Caption("View");
+    ImGui::SetNextItemWidth(-1);
+    const char* view_name = view == "player" ? "First person" : view == "free" ? "Free camera" : "Current game camera";
+    if (ImGui::BeginCombo("##presentation_view", view_name)) {
+      DrawBackdrop();
+      option("player", "First person", view == "player", {{"view", "player"}});
+      Json free = {{"view", "free"}};
+      if (hud == "gameplay") free["hud"] = "demo";
+      option("free", "Free camera", view == "free", free);
+      ImGui::EndCombo();
+    }
+    Caption("HUD");
+    ImGui::SetNextItemWidth(-1);
+    const char* hud_name = hud == "hidden" ? "Hidden" : hud == "gameplay" ? "As playing" : view == "free" ? "Shown" : "Demo spectator";
+    if (ImGui::BeginCombo("##presentation_hud", hud_name)) {
+      DrawBackdrop();
+      if (view == "player") option("gameplay", "As playing", hud == "gameplay", {{"hud", "gameplay"}});
+      option("demo", view == "free" ? "Shown" : "Demo spectator", hud == "demo", {{"hud", "demo"}});
+      option("hidden", "Hidden", hud == "hidden", {{"hud", "hidden"}});
+      ImGui::EndCombo();
+    }
+    if (Boolean(Member(presentation_, "pending"))) Caption("Applying view / HUD...");
+    const auto error = String(Member(presentation_, "error"));
+    if (!error.empty()) ImGui::TextWrapped("%s", error.c_str());
+    ImGui::Separator();
+  }
+  void DrawTeamPalette(const Send& send) {
+    if (!cosmetics_.is_object() || !ImGui::TreeNode("Team palette")) return;
+    const Json& capability = Member(Member(cosmetics_, "capabilities"), "team_palette");
+    const bool available = Boolean(Member(capability, "available"));
+    ImGui::BeginDisabled(!demo_ || !available);
+    if (ImGui::Checkbox("Override player colors", &palette_enabled_))
+      Emit(send, "set_team_palette", {{"enabled", palette_enabled_}});
+    auto color = [&](const char* label, std::array<float, 3>& value, const char* field) {
+      ImGui::SetNextItemWidth(-1);
+      ImGui::ColorEdit3(label, value.data(), ImGuiColorEditFlags_NoAlpha |
+                                              ImGuiColorEditFlags_NoOptions);
+      if (ImGui::IsItemDeactivatedAfterEdit()) {
+        Json rgb = Json::array();
+        for (float channel : value) rgb.push_back(static_cast<int>(std::round(Clamp(channel, 0, 1) * 255)));
+        Emit(send, "set_team_palette", {{field, rgb}});
+      }
+    };
+    color("T", palette_t_, "t");
+    color("CT", palette_ct_, "ct");
+    if (ImGui::Button("Reset player colors", ImVec2(-1, 0))) Emit(send, "reset_team_palette");
+    ImGui::EndDisabled();
+    const std::string reason = String(Member(capability, "reason"));
+    if (!available && !reason.empty()) ImGui::TextWrapped("%s", reason.c_str());
+    ImGui::TreePop();
+  }
+  static std::string PlayerLabel(const Json& player) {
+    const std::string id = String(Member(player, "steam_id"));
+    const int team = Integer(Member(player, "team"));
+    return String(Member(player, "nickname"), "Unknown player") + " [" +
+        (team == 2 ? "T" : team == 3 ? "CT" : "Observer") + "] #" +
+        (id.size() > 5 ? id.substr(id.size() - 5) : id);
+  }
+  void DrawWeaponPaint(const Send& send, bool knife, bool target_ready) {
+    const Json& definitions = Member(cosmetics_catalog, "weapons");
+    const Json& paints = Member(cosmetics_catalog, "paint_kits");
+    const Json& rows = Member(weapon_cosmetics_, "weapons");
+    const Json& capability = Member(weapon_cosmetics_, "capability");
+    const bool available = Boolean(Member(capability, "available"));
+    const Json* selected = nullptr;
+    const Json* definition = nullptr;
+    auto find_definition = [&](int id) -> const Json* {
+      if (definitions.is_array()) for (const auto& item : definitions)
+        if (Integer(Member(item, "item_def")) == id &&
+            (String(Member(item, "kind")) == "knife") == knife) return &item;
+      return nullptr;
+    };
+    std::vector<const Json*> owned;
+    if (rows.is_array()) for (const auto& row : rows) {
+      if (String(Member(row, "steam_id")) != cosmetic_player_) continue;
+      const int id = Integer(Member(row, "item_def"));
+      if (!find_definition(id)) continue;
+      owned.push_back(&row);
+      if (id == cosmetic_weapon_) selected = &row;
+    }
+    if (!selected && !owned.empty()) {
+      selected = owned.front();
+      for (const Json* row : owned) if (Boolean(Member(*row, "active"))) selected = row;
+      cosmetic_weapon_ = Integer(Member(*selected, "item_def"));
+    }
+    if (selected) definition = find_definition(cosmetic_weapon_);
+    Caption(knife ? "Owned knife" : "Owned weapon");
+    ImGui::SetNextItemWidth(-1);
+    const auto name = definition ? String(Member(*definition, "display_name")) : "No matching owned item";
+    if (ImGui::BeginCombo("##cosmetic_weapon", name.c_str())) {
+      DrawBackdrop();
+      for (const Json* row : owned) {
+        const int id = Integer(Member(*row, "item_def"));
+        const Json* item = find_definition(id);
+        ImGui::PushID(id);
+        const auto label = String(Member(*item, "display_name"));
+        if (ImGui::Selectable(label.c_str(), id == cosmetic_weapon_)) cosmetic_weapon_ = id;
+        ImGui::PopID();
+      }
+      ImGui::EndCombo();
+    }
+    if (!selected || !definition) {
+      ImGui::TextWrapped("Select a player who owns this category of item at the current demo tick.");
+      return;
+    }
+    const std::string target = cosmetic_player_ + ":" + std::to_string(cosmetic_weapon_);
+    const std::string native = Member(*selected, "paint_kit").dump() + ":" +
+        Member(*selected, "seed").dump() + ":" + Member(*selected, "wear").dump();
+    if (target != weapon_draft_target_ || native != weapon_draft_native_) {
+      cosmetic_paint_ = Integer(Member(*selected, "paint_kit"));
+      cosmetic_seed_ = Integer(Member(*selected, "seed"));
+      cosmetic_wear_ = Number(Member(*selected, "wear"), .01f);
+      weapon_draft_target_ = target;
+      weapon_draft_native_ = native;
+    }
+    const Json* paint = nullptr;
+    if (paints.is_array()) for (const auto& item : paints)
+      if (Integer(Member(item, "id")) == cosmetic_paint_) paint = &item;
+    const Json& allowed = Member(*definition, "paint_kits");
+    Caption("Finish from game");
+    ImGui::SetNextItemWidth(-1);
+    ImGui::SetNextWindowSizeConstraints(ImVec2(0, 0), ImVec2(std::numeric_limits<float>::max(), S(360)));
+    const auto paint_name = paint ? String(Member(*paint, "display_name")) : "Original finish";
+    if (ImGui::BeginCombo("##cosmetic_finish", paint_name.c_str())) {
+      DrawBackdrop();
+      ImGui::SetNextItemWidth(-1);
+      ImGui::InputTextWithHint("##paint_filter", "Find finish...", paint_filter_, sizeof(paint_filter_));
+      if (ImGui::Selectable("Original finish", cosmetic_paint_ == 0)) cosmetic_paint_ = 0;
+      ImGuiTextFilter filter(paint_filter_);
+      if (paints.is_array() && allowed.is_array()) for (const auto& item : paints) {
+        const int id = Integer(Member(item, "id"));
+        if (std::find(allowed.begin(), allowed.end(), Json(id)) == allowed.end()) continue;
+        const auto label = String(Member(item, "display_name"));
+        if (!filter.PassFilter(label.c_str())) continue;
+        ImGui::PushID(id);
+        if (ImGui::Selectable(label.c_str(), cosmetic_paint_ == id)) {
+          cosmetic_paint_ = id;
+          cosmetic_wear_ = Clamp(cosmetic_wear_, Number(Member(item, "wear_min")), Number(Member(item, "wear_max"), 1));
+        }
+        ImGui::PopID();
+      }
+      ImGui::EndCombo();
+    }
+    const float half = (ImGui::GetContentRegionAvail().x - S(7)) / 2;
+    const float second = ImGui::GetCursorPosX() + half + S(7);
+    Caption("Wear");ImGui::SameLine(second);Caption("Pattern seed");
+    ImGui::SetNextItemWidth(half);
+    NumericField("##cosmetic_wear", &cosmetic_wear_, paint ? Number(Member(*paint, "wear_min")) : 0,
+                 paint ? Number(Member(*paint, "wear_max"), 1) : 1, "%.4f");
+    ImGui::SameLine();ImGui::SetNextItemWidth(half);
+    NumericField("##cosmetic_seed", &cosmetic_seed_, 0, 1000);
+    ImGui::BeginDisabled(!demo_ || !target_ready || !available ||
+                        Boolean(Member(weapon_cosmetics_, "stale")) || !Boolean(Member(*selected, "ready")));
+    if (ImGui::Button("Apply finish", ImVec2(half, 0))) {
+      if (cosmetic_paint_ == 0) Emit(send, "reset_player_weapon_paint", {{"steam_id", cosmetic_player_}, {"item_def", cosmetic_weapon_}});
+      else Emit(send, "set_player_weapon_paint", {{"steam_id", cosmetic_player_}, {"item_def", cosmetic_weapon_},
+                         {"paint_kit", cosmetic_paint_}, {"wear", cosmetic_wear_}, {"seed", cosmetic_seed_}});
+    }
+    ImGui::EndDisabled();ImGui::SameLine();
+    ImGui::BeginDisabled(!demo_ || !target_ready || !available);
+    if (ImGui::Button("Restore finish", ImVec2(half, 0)))
+      Emit(send, "reset_player_weapon_paint", {{"steam_id", cosmetic_player_}, {"item_def", cosmetic_weapon_}});
+    ImGui::EndDisabled();
+    const auto error = String(Member(*selected, "error"));
+    const auto reason = String(Member(*selected, "reason"));
+    if (!error.empty()) ImGui::TextWrapped("%s", error.c_str());
+    else if (!Boolean(Member(*selected, "ready")) && !reason.empty()) ImGui::TextWrapped("%s", reason.c_str());
+    else if (Boolean(Member(*selected, "applied"))) Caption("Finish attributes and material refresh confirmed");
+    Tip("Applies a finish to this player's owned item. Switching the weapon model is a separate operation.");
+  }
+  void DrawGloves(const Send& send, int team, bool target_ready) {
+    const Json& definitions = Member(cosmetics_catalog, "gloves");
+    const Json& paints = Member(cosmetics_catalog, "paint_kits");
+    const Json& rows = Member(glove_cosmetics_, "gloves");
+    const Json* row = nullptr;
+    if (rows.is_array()) for (const auto& candidate : rows)
+      if (String(Member(candidate, "steam_id")) == cosmetic_player_) row = &candidate;
+    const std::string target = cosmetic_player_ + ":" + std::to_string(team);
+    const std::string native = row ? Member(*row, "requested_item_def").dump() + ":" +
+        Member(*row, "paint_kit").dump() + ":" + Member(*row, "seed").dump() + ":" + Member(*row, "wear").dump() : "unavailable";
+    const bool acknowledgement_pending = revision_ == pending_revision_ && ImGui::GetTime() < pending_until_;
+    if (target != glove_draft_target_ || (row && native != glove_draft_native_ &&
+        !glove_draft_dirty_ && !was_item_active_ && !acknowledgement_pending)) {
+      glove_item_ = row ? Integer(Member(*row, "requested_item_def")) : 0;
+      glove_paint_ = row ? Integer(Member(*row, "paint_kit")) : 0;
+      glove_seed_ = row ? Integer(Member(*row, "seed")) : 0;
+      glove_wear_ = row ? Number(Member(*row, "wear"), .01f) : .01f;
+      glove_draft_target_ = target;
+      glove_draft_native_ = native;
+      glove_draft_dirty_ = false;
+    }
+    auto compatible = [&](const Json& item) {
+      const Json& teams = Member(item, "allowed_teams");
+      const Json& kits = Member(item, "paint_kits");
+      return teams.is_array() && std::find(teams.begin(), teams.end(), Json(team)) != teams.end() &&
+          kits.is_array() && !kits.empty();
+    };
+    auto definition = [&]() -> const Json* {
+      if (definitions.is_array()) for (const auto& item : definitions)
+        if (Integer(Member(item, "item_def")) == glove_item_ && compatible(item)) return &item;
+      return nullptr;
+    };
+    const Json* item = definition();
+    Caption("Gloves from game");
+    ImGui::SetNextItemWidth(-1);
+    const std::string name = item ? String(Member(*item, "display_name")) : "Original gloves";
+    if (ImGui::BeginCombo("##glove_item", name.c_str())) {
+      DrawBackdrop();
+      if (ImGui::Selectable("Original gloves", glove_item_ == 0)) { glove_item_ = 0; glove_paint_ = 0; glove_draft_dirty_ = true; }
+      if (definitions.is_array()) for (const auto& candidate : definitions) {
+        if (!compatible(candidate)) continue;
+        const int id = Integer(Member(candidate, "item_def"));
+        ImGui::PushID(id);
+        const auto label = String(Member(candidate, "display_name"));
+        if (ImGui::Selectable(label.c_str(), id == glove_item_)) {
+          glove_item_ = id;
+          glove_draft_dirty_ = true;
+          const Json& kits = Member(candidate, "paint_kits");
+          if (std::find(kits.begin(), kits.end(), Json(glove_paint_)) == kits.end()) glove_paint_ = Integer(kits.front());
+        }
+        ImGui::PopID();
+      }
+      ImGui::EndCombo();
+    }
+    item = definition();
+    auto paint_definition = [&]() -> const Json* {
+      if (paints.is_array()) for (const auto& paint : paints)
+        if (Integer(Member(paint, "id")) == glove_paint_ && String(Member(paint, "category")) == "glove") return &paint;
+      return nullptr;
+    };
+    if (item) {
+      const Json& kits = Member(*item, "paint_kits");
+      const Json* paint = paint_definition();
+      Caption("Glove finish");
+      ImGui::SetNextItemWidth(-1);
+      ImGui::SetNextWindowSizeConstraints(ImVec2(0, 0), ImVec2(std::numeric_limits<float>::max(), S(360)));
+      const auto label = paint ? String(Member(*paint, "display_name")) : "Choose finish";
+      if (ImGui::BeginCombo("##glove_finish", label.c_str())) {
+        DrawBackdrop();
+        ImGui::SetNextItemWidth(-1);
+        ImGui::InputTextWithHint("##glove_filter", "Find finish...", glove_filter_, sizeof(glove_filter_));
+        ImGuiTextFilter filter(glove_filter_);
+        if (paints.is_array()) for (const auto& candidate : paints) {
+          const int id = Integer(Member(candidate, "id"));
+          if (String(Member(candidate, "category")) != "glove" || std::find(kits.begin(), kits.end(), Json(id)) == kits.end()) continue;
+          const auto finish_name = String(Member(candidate, "display_name"));
+          if (!filter.PassFilter(finish_name.c_str())) continue;
+          ImGui::PushID(id);
+          if (ImGui::Selectable(finish_name.c_str(), glove_paint_ == id)) { glove_paint_ = id; glove_draft_dirty_ = true; }
+          ImGui::PopID();
+        }
+        ImGui::EndCombo();
+      }
+      paint = paint_definition();
+      const float minimum = paint ? Number(Member(*paint, "wear_min")) : 0;
+      const float maximum = paint ? Number(Member(*paint, "wear_max"), 1) : 1;
+      glove_wear_ = Clamp(glove_wear_, minimum, maximum);
+      const float half = (ImGui::GetContentRegionAvail().x - S(7)) / 2;
+      const float second = ImGui::GetCursorPosX() + half + S(7);
+      Caption("Wear");ImGui::SameLine(second);Caption("Pattern seed");
+      ImGui::SetNextItemWidth(half);
+      if (NumericField("##glove_wear", &glove_wear_, minimum, maximum, "%.4f")) glove_draft_dirty_ = true;
+      ImGui::SameLine();ImGui::SetNextItemWidth(half);
+      if (NumericField("##glove_seed", &glove_seed_, 0, 1000)) glove_draft_dirty_ = true;
+    }
+    const bool available = Boolean(Member(Member(glove_cosmetics_, "capability"), "available"));
+    const bool current = target_ready && !Boolean(Member(glove_cosmetics_, "stale"));
+    const bool ready = row && Boolean(Member(*row, "ready")) && Boolean(Member(*row, "item_readable")) &&
+        !Boolean(Member(*row, "restoration_unresolved"));
+    const float half = (ImGui::GetContentRegionAvail().x - S(7)) / 2;
+    ImGui::BeginDisabled(!demo_ || !available || !current || !ready || (glove_item_ != 0 && (!item || !paint_definition())));
+    if (ImGui::Button("Apply gloves", ImVec2(half, 0))) {
+      glove_draft_dirty_ = false;
+      if (!glove_item_) Emit(send, "reset_player_gloves", {{"steam_id", cosmetic_player_}});
+      else Emit(send, "set_player_gloves", {{"steam_id", cosmetic_player_}, {"item_def", glove_item_},
+                                        {"paint_kit", glove_paint_}, {"wear", glove_wear_}, {"seed", glove_seed_}});
+    }
+    ImGui::EndDisabled();ImGui::SameLine();
+    ImGui::BeginDisabled(!demo_ || !available || !target_ready);
+    if (ImGui::Button("Restore gloves", ImVec2(half, 0))) { glove_draft_dirty_ = false; Emit(send, "reset_player_gloves", {{"steam_id", cosmetic_player_}}); }
+    ImGui::EndDisabled();
+    if (row) {
+      const auto error = String(Member(*row, "error"));
+      const auto reason = String(Member(*row, "reason"));
+      if (!error.empty()) ImGui::TextWrapped("%s", error.c_str());
+      else if (!ready && !reason.empty()) ImGui::TextWrapped("%s", reason.c_str());
+      else if (Integer(Member(*row, "requested_item_def")) && Boolean(Member(*row, "materials_pending"))) {
+        if (Member(*row, "world_pose_ready").is_boolean() && !Boolean(Member(*row, "world_pose_ready")))
+          Caption("Updating glove pose...");
+        else if (Member(*row, "world_render_ready").is_boolean() &&
+                 (!Boolean(Member(*row, "world_render_ready")) || !Boolean(Member(*row, "hud_render_ready"))))
+          Caption("Updating glove visibility...");
+        else Caption("Preparing glove materials...");
+      }
+      else if (Boolean(Member(*row, "applied"))) Caption("Glove item and material refresh confirmed");
+    } else Caption("Waiting for the player's glove item");
+  }
+  void DrawCosmetics(const Send& send) {
+    if (!cosmetics_.is_object() && !cosmetics_catalog.is_object()) return;
+    if (!ImGui::CollapsingHeader("Models and skins")) return;
+    const Json& players = Member(cosmetics_, "players");
+    const Json* selected = nullptr;
+    if (players.is_array()) {
+      for (const auto& player : players) {
+        const std::string id = String(Member(player, "steam_id"));
+        if (id.empty() || id == "0") continue;
+        if (cosmetic_player_.empty()) cosmetic_player_ = id;
+        if (id == cosmetic_player_) selected = &player;
+      }
+    }
+    Caption("Player");
+    ImGui::SetNextItemWidth(-1);
+    const std::string preview = selected ? PlayerLabel(*selected) :
+        cosmetic_player_.empty() ? "Waiting for players" : "Selected player unavailable";
+    if (ImGui::BeginCombo("##cosmetic_player", preview.c_str())) {
+      DrawBackdrop();
+      if (players.is_array()) for (const auto& player : players) {
+        const std::string id = String(Member(player, "steam_id"));
+        if (id.empty() || id == "0") continue;
+        const std::string label = PlayerLabel(player);
+        ImGui::PushID(id.c_str());
+        if (ImGui::Selectable(label.c_str(), id == cosmetic_player_)) {
+          cosmetic_player_ = id;
+          cosmetic_draft_target_.clear();
+          cosmetic_filter_[0] = 0;
+        }
+        ImGui::PopID();
+      }
+      ImGui::EndCombo();
+    }
+    const char* categories[] = {"Agents", "Weapons", "Knives", "Gloves"};
+    const char* ids[] = {"agents", "weapons", "knives", "gloves"};
+    Caption("Category");
+    ImGui::SetNextItemWidth(-1);
+    if (ImGui::BeginCombo("##cosmetic_category", categories[cosmetic_category_])) {
+      DrawBackdrop();
+      for (int i = 0; i < 4; ++i)
+        if (ImGui::Selectable(categories[i], cosmetic_category_ == i)) cosmetic_category_ = i;
+      ImGui::EndCombo();
+    }
+    const Json& capability = (cosmetic_category_ == 1 || cosmetic_category_ == 2) && weapon_cosmetics_.is_object()
+        ? Member(weapon_cosmetics_, "capability") : cosmetic_category_ == 3 && glove_cosmetics_.is_object()
+        ? Member(glove_cosmetics_, "capability") : Member(Member(cosmetics_, "capabilities"), ids[cosmetic_category_]);
+    const bool available = Boolean(Member(capability, "available"));
+    const int team = selected ? Integer(Member(*selected, "team")) : 0;
+    const bool target_ready = selected && (team == 2 || team == 3) &&
+        !Boolean(Member(cosmetics_, "stale"));
+    if (cosmetic_category_ == 0) {
+      const std::string target = cosmetic_player_ + ":" + std::to_string(team);
+      if (target != cosmetic_draft_target_ ||
+          (revision_ != cosmetic_seen_revision_ && !was_item_active_ &&
+           (revision_ != pending_revision_ || ImGui::GetTime() >= pending_until_))) {
+        cosmetic_agent_ = selected ? Integer(Member(*selected, "agent_item_def")) : 0;
+        cosmetic_draft_target_ = target;
+        cosmetic_seen_revision_ = revision_;
+      }
+      std::string name = "Current map model";
+      const Json& agents = Member(cosmetics_catalog, "agents");
+      if (agents.is_array()) for (const auto& agent : agents)
+        if (Integer(Member(agent, "item_def")) == cosmetic_agent_)
+          name = String(Member(agent, "display_name"), "Unknown agent");
+      Caption(team == 2 ? "T agents from game" : team == 3 ? "CT agents from game" : "Agents from game");
+      ImGui::BeginDisabled(!target_ready || !agents.is_array());
+      ImGui::SetNextItemWidth(-1);
+      ImGui::SetNextWindowSizeConstraints(ImVec2(0, 0), ImVec2(std::numeric_limits<float>::max(), S(360)));
+      if (ImGui::BeginCombo("##cosmetic_agent", name.c_str())) {
+        DrawBackdrop();
+        ImGui::SetNextItemWidth(-1);
+        ImGui::InputTextWithHint("##agent_filter", "Find agent...", cosmetic_filter_, sizeof(cosmetic_filter_));
+        if (ImGui::Selectable("Current map model", cosmetic_agent_ == 0)) cosmetic_agent_ = 0;
+        ImGuiTextFilter filter(cosmetic_filter_);
+        if (agents.is_array()) for (const auto& agent : agents) {
+          const auto& teams = Member(agent, "allowed_teams");
+          if (!teams.is_array() || teams.size() != 1 || Integer(teams[0]) != team ||
+              Boolean(Member(agent, "map_based")) || String(Member(agent, "model")).empty()) continue;
+          const std::string label = String(Member(agent, "display_name"));
+          if (!filter.PassFilter(label.c_str())) continue;
+          const int item = Integer(Member(agent, "item_def"));
+          ImGui::PushID(item);
+          if (ImGui::Selectable(label.c_str(), cosmetic_agent_ == item)) cosmetic_agent_ = item;
+          ImGui::PopID();
+        }
+        ImGui::EndCombo();
+      }
+      ImGui::EndDisabled();
+      const float half = (ImGui::GetContentRegionAvail().x - S(7)) / 2;
+      const bool model_ready = selected && Boolean(Member(*selected, "model_ready"));
+      ImGui::BeginDisabled(!demo_ || !target_ready || !available || !model_ready);
+      if (ImGui::Button("Apply to player", ImVec2(half, 0))) {
+        if (cosmetic_agent_ == 0) Emit(send, "reset_player_cosmetics", {{"steam_id", cosmetic_player_}});
+        else Emit(send, "set_player_cosmetics", {{"steam_id", cosmetic_player_}, {"agent_item_def", cosmetic_agent_}});
+      }
+      ImGui::SameLine();
+      if (ImGui::Button("Map default", ImVec2(half, 0))) {
+        cosmetic_agent_ = 0;
+        Emit(send, "reset_player_cosmetics", {{"steam_id", cosmetic_player_}});
+      }
+      ImGui::EndDisabled();
+      if (target_ready && available && !model_ready) Caption("Waiting for the player's model binding");
+    }
+    if (cosmetic_category_ == 1 || cosmetic_category_ == 2) DrawWeaponPaint(send, cosmetic_category_ == 2, target_ready);
+    if (cosmetic_category_ == 3) DrawGloves(send, team, target_ready);
+    if (!available) {
+      std::string reason = String(Member(capability, "reason"));
+      if (reason.empty()) reason = "Live replacement is not available for this category on the current game build.";
+      ImGui::TextWrapped("%s", reason.c_str());
+    }
+    if (selected) {
+      const auto error = String(Member(*selected, "error"));
+      if (!error.empty()) ImGui::TextWrapped("%s", error.c_str());
+      else if (Boolean(Member(*selected, "applied"))) Caption("Player override active");
+    }
+    if (!cosmetics_catalog_error.empty()) ImGui::TextWrapped("%s", cosmetics_catalog_error.c_str());
+    ImGui::BeginDisabled(true);
+    ImGui::Button("Import...", ImVec2(-1, 0));
+    ImGui::EndDisabled();
+    Tip("Custom compiled Source 2 models require a compatible per-player resource adapter. The installed-game catalog is the primary source.");
+    DrawAppearance(send);
+    ImGui::Separator();
+  }
+  void DrawAppearance(const Send& send) {
+    if (!appearance_capabilities_.is_object()) return;
+    if (!ImGui::TreeNode("Advanced resource diagnostics")) return;
+    ImGui::TextWrapped("Compiled Source 2 appearance pack. Replaces matching model resources throughout the scene.");
+    Caption("Pack directory");
+    ImGui::SetNextItemWidth(-1);
+    ImGui::InputText("##appearance_path", appearance_path_, sizeof(appearance_path_));
+    Caption("Model resources (.vmdl), one per line");
+    ImGui::SetNextItemWidth(-1);
+    ImGui::InputTextMultiline("##appearance_models", appearance_models_, sizeof(appearance_models_), ImVec2(-1, S(76)));
+    const bool available = Boolean(Member(appearance_capabilities_, "available"));
+    ImGui::BeginDisabled(!demo_ || !available);
+    const float half = (ImGui::GetContentRegionAvail().x - S(7)) / 2;
+    if (ImGui::Button("Apply pack", ImVec2(half, 0))) {
+      Json models = Json::array();
+      std::string lines(appearance_models_);
+      size_t begin = 0;
+      while (begin < lines.size()) {
+        const auto end = lines.find('\n', begin);
+        std::string value = lines.substr(begin, end == std::string::npos ? end : end - begin);
+        const auto first = value.find_first_not_of(" \t\r");
+        const auto last = value.find_last_not_of(" \t\r");
+        if (first != std::string::npos) models.push_back(value.substr(first, last - first + 1));
+        if (end == std::string::npos) break;
+        begin = end + 1;
+      }
+      Emit(send, "apply_appearance_pack", {{"path", std::string(appearance_path_)}, {"models", models}});
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Reset appearance", ImVec2(half, 0))) Emit(send, "reset_appearance");
+    ImGui::EndDisabled();
+    if (!available) ImGui::TextWrapped("Appearance replacement is unavailable on this game build.");
+    if (Boolean(Member(appearance_, "active"))) {
+      const auto path = String(Member(appearance_, "path"));
+      ImGui::TextWrapped("Active: %s", path.c_str());
+      ImGui::TextWrapped("Resource pack mounted. This is a global resource override.");
+    }
+    const auto error = String(Member(appearance_, "error"));
+    if (!error.empty()) ImGui::TextWrapped("%s", error.c_str());
+    Tip("An AI client can list installed models and prepare a pack with the asset MCP tools. Custom files must already be compiled for Source 2.");
+    ImGui::TreePop();
   }
   void ApplyStyle() const {
     auto& style = ImGui::GetStyle();
@@ -360,6 +1023,8 @@ class EditorUi {
     const double before = static_cast<double>(*value);
     if constexpr (std::is_integral<T>::value)
       ImGui::InputInt(label, value, 0, 0, ImGuiInputTextFlags_AutoSelectAll);
+    else if constexpr (std::is_same<T, double>::value)
+      ImGui::InputDouble(label, value, 0, 0, format, ImGuiInputTextFlags_AutoSelectAll);
     else
       ImGui::InputFloat(label, value, 0, 0, format, ImGuiInputTextFlags_AutoSelectAll);
     if (ImGui::IsItemActivated()) {
@@ -454,7 +1119,7 @@ class EditorUi {
     draw->ChannelsMerge();
   }
   void Tip(const char* text) const {
-    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal | ImGuiHoveredFlags_AllowWhenDisabled)) {
       ImGui::BeginTooltip();
       DrawBackdrop();
       ImGui::PushTextWrapPos(ImGui::GetFontSize() * 27);
@@ -514,6 +1179,18 @@ class EditorUi {
     }
     ImGui::Separator();
     ImGui::BeginDisabled(!connected_);
+    const float panel_width = (ImGui::GetContentRegionAvail().x - S(7)) / 2;
+    if (general_panel_) AccentButton("General", ImVec2(panel_width, 0));
+    else if (ImGui::Button("General", ImVec2(panel_width, 0))) general_panel_ = true;
+    ImGui::SameLine();
+    if (!general_panel_) AccentButton("Camera keys", ImVec2(panel_width, 0));
+    else if (ImGui::Button("Camera keys", ImVec2(panel_width, 0))) general_panel_ = false;
+    ImGui::Spacing();
+    if (general_panel_) {
+      DrawPresentation(send);
+      DrawSceneSettings(send);
+      DrawCosmetics(send);
+    } else {
     if (ImGui::CollapsingHeader("Shot settings")) {
       Caption("Project");
       ImGui::SetNextItemWidth(-1);
@@ -548,6 +1225,8 @@ class EditorUi {
       }
       Tip("Smooth blends the spatial path through keys. Linear uses straight segments. "
           "The speed curve controls timing independently.");
+      ImGui::Separator();
+      DrawRenderRange(send);
       ImGui::Separator();
     }
     const float tabs_width = (ImGui::GetContentRegionAvail().x - S(7)) / 2;
@@ -637,6 +1316,7 @@ class EditorUi {
     }
     Tip("Replace this track with a camera preset. Ctrl+Z restores the previous track.");
     ImGui::EndDisabled();
+    }
     ImGui::EndDisabled();
     if (!error_.empty()) {
       ImGui::Spacing();
@@ -715,11 +1395,13 @@ class EditorUi {
       ImGui::TableSetupColumn("Key", 0, .42f);
       row("Capture keyframe", "K");
       row("Play / pause preview", "Space");
+      row("Set render region In / Out", "I / O");
       row("Remove selected key", "Delete");
       row("Undo", "Ctrl+Z");
       row("Redo", "Ctrl+Shift+Z / Ctrl+Y");
       row("Save project", "Ctrl+S");
       row("Load project", "Ctrl+O");
+      row("Export video", "Ctrl+E");
       row("Drag without tick snapping", "Shift");
       row("Show / hide this panel", "F10");
       ImGui::EndTable();
@@ -782,7 +1464,7 @@ class EditorUi {
     const float width = key_mode ?
         (ImGui::GetContentRegionAvail().x - S(7)) / 2 : ImGui::GetContentRegionAvail().x;
     const float second_column = ImGui::GetCursorPosX() + width + S(7);
-    Caption("Field of view");
+    Caption("Field of view / FOV");
     if (key_mode) {
       ImGui::SameLine(second_column);
       Caption("Time");
@@ -790,6 +1472,8 @@ class EditorUi {
     ImGui::SetNextItemWidth(width);
     if (NumericField("##fov", &draft_.fov, 1, 179, "%.1f deg"))
       CommitPose(send, "fov", draft_.fov);
+    Tip(key_mode ? "Lens angle at this camera key. Different FOV values animate the lens between keys." :
+                   "Change the current camera lens without adding a key. Capture a key to save this FOV in the path.");
     if (key_mode) {
       ImGui::SameLine();
       ImGui::SetNextItemWidth(width);
@@ -964,6 +1648,8 @@ class EditorUi {
     ImGui::Separator();
     if (ImGui::MenuItem("Save project", "Ctrl+S")) Emit(send, "save_project");
     if (ImGui::MenuItem("Load project", "Ctrl+O")) Emit(send, "load_project");
+    if (ImGui::MenuItem("Export video...", "Ctrl+E", false, demo_ && !keys_.empty()))
+      Emit(send, "request_export");
     ImGui::Separator();
     if (ImGui::MenuItem("Undo", "Ctrl+Z")) Emit(send, "undo");
     if (ImGui::MenuItem("Redo", "Ctrl+Shift+Z")) Emit(send, "redo");
@@ -1049,6 +1735,13 @@ class EditorUi {
     if (CameraButton("##capture", "Capture", S(110))) Capture(send);
     Tip("Capture current camera. An existing key at this time is updated.");
     ImGui::EndDisabled();
+    ImGui::SameLine(0, S(14));
+    DrawRenderScope(send, S(210));
+    ImGui::SameLine(0, S(14));
+    ImGui::BeginDisabled(!demo_ || keys_.empty());
+    if (ToolbarButton("Export", ImVec2(S(100), S(36)))) Emit(send, "request_export");
+    Tip("Open the application's export window. Ctrl+E");
+    ImGui::EndDisabled();
     const float right_start = size.x - S(480);
     ImGui::SetCursorPos(ImVec2(std::max(right_start, ImGui::GetItemRectMax().x - pos.x + S(20)), S(52.5f)));
     if (CameraButton("##camera_inspector", "Camera", S(116))) show_inspector_ = !show_inspector_;
@@ -1095,6 +1788,16 @@ class EditorUi {
                             IM_COL32(255, 255, 255, i % 2 ? 80 : 32));
       segment_start = segment_end;
     }
+    const float region_in = range_drag_handle_ == 0 ? range_drag_time_ : range_in_;
+    const float region_out = range_drag_handle_ == 1 ? range_drag_time_ : range_out_;
+    if (render_region_ || range_drag_handle_ >= 0) {
+      draw->AddRectFilled(ImVec2(left, pos.y), ImVec2(tx(region_in), track_bottom),
+                          IM_COL32(0, 0, 0, 100));
+      draw->AddRectFilled(ImVec2(tx(region_out), pos.y), ImVec2(right, track_bottom),
+                          IM_COL32(0, 0, 0, 100));
+      draw->AddRectFilled(ImVec2(tx(region_in), track_top),
+                          ImVec2(tx(region_out), track_bottom), Ink(.16f));
+    }
     if (keys_.empty()) {
       const char* hint = "Capture a keyframe or create a preset";
       const ImVec2 text_size = ImGui::CalcTextSize(hint);
@@ -1113,7 +1816,42 @@ class EditorUi {
         }
       }
     }
-    if (hovered && connected_ && !keys_.empty() &&
+    int hovered_range = -1;
+    if (hovered && ImGui::GetIO().MousePos.y >= track_top - S(2)) {
+      const float in_distance = std::abs(ImGui::GetIO().MousePos.x - tx(region_in));
+      const float out_distance = std::abs(ImGui::GetIO().MousePos.x - tx(region_out));
+      if (std::min(in_distance, out_distance) <= S(11))
+        hovered_range = in_distance <= out_distance ? 0 : 1;
+    }
+    if (hovered_range >= 0 && connected_ && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+      range_drag_handle_ = hovered_range;
+      range_drag_initial_ = range_drag_time_ = hovered_range ? range_out_ : range_in_;
+      range_drag_start_x_ = ImGui::GetIO().MousePos.x;
+      range_drag_moved_ = false;
+      timeline_active_ = false;
+      timeline_drag_id_.clear();
+    }
+    if (range_drag_handle_ >= 0) {
+      ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+      if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+        range_drag_handle_ = -1;
+      } else if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        const float delta = ImGui::GetIO().MousePos.x - range_drag_start_x_;
+        if (std::abs(delta) > S(2)) range_drag_moved_ = true;
+        if (range_drag_moved_) {
+          double time = range_drag_initial_ + delta / width * exact_duration_;
+          if (!ImGui::GetIO().KeyShift) time = std::round(time * tick_rate_) / tick_rate_;
+          range_drag_time_ = range_drag_handle_ == 0 ? std::clamp(time, 0.0, range_out_ - RangeSpan()) :
+                                                         std::clamp(time, range_in_ + RangeSpan(), exact_duration_);
+        }
+      } else {
+        if (std::abs(range_drag_time_ - range_drag_initial_) > .000001f)
+          Emit(send, "set_project", {{"render_range", {{"mode", "region"},
+                                      {range_drag_handle_ == 0 ? "in" : "out", range_drag_time_}}}});
+        range_drag_handle_ = -1;
+      }
+    }
+    if (hovered && hovered_range < 0 && range_drag_handle_ < 0 && connected_ && !keys_.empty() &&
         ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
       timeline_active_ = true;
       timeline_drag_id_ = hovered_id;
@@ -1161,13 +1899,34 @@ class EditorUi {
                                 ImVec2(x, y + r), ImVec2(x - r, y)};
       draw->AddConvexPolyFilled(diamond, 4, color);
     }
+    // Brackets occupy the slider row, below camera diamonds, so a region
+    // gesture never shifts a key or seeks the demo.
+    for (int edge = 0; edge < 2; ++edge) {
+      const float time = range_drag_handle_ == edge ? range_drag_time_ : (edge ? range_out_ : range_in_);
+      const float x = tx(time), direction = edge ? -1.0f : 1.0f;
+      const ImU32 color = Ink(render_region_ || hovered_range == edge || range_drag_handle_ == edge ? .95f : .4f);
+      draw->AddLine(ImVec2(x, track_top - S(3)), ImVec2(x, pos.y + S(47)), color, S(2));
+      draw->AddTriangleFilled(ImVec2(x, pos.y + S(39)),
+                               ImVec2(x + direction * S(9), pos.y + S(43)),
+                               ImVec2(x, pos.y + S(47)), color);
+    }
     const float playhead = tx(timeline_active_ ? timeline_drag_time_ : cursor_);
     draw->AddRectFilled(ImVec2(playhead - S(8), pos.y + S(26)),
                         ImVec2(playhead + S(8), pos.y + S(42)),
                         IM_COL32(255, 255, 255, 255), S(2));
-    if (hovered && !timeline_active_) {
-      Tip(hovered_id.empty() ? "Click or drag to scrub. Release to seek. Shift disables tick snapping." :
+    if (hovered && !timeline_active_ && range_drag_handle_ < 0) {
+      Tip(hovered_range == 0 ? "Render region In. Drag to trim the start. I sets In at the playhead." :
+          hovered_range == 1 ? "Render region Out. Drag to trim the end. O sets Out at the playhead." :
+          hovered_id.empty() ? "Click or drag to scrub. Release to seek. Shift disables tick snapping." :
                               "Click to select and seek. Drag to move the keyframe. Shift disables tick snapping.");
+    }
+    if (range_drag_handle_ >= 0) {
+      char time[32];
+      TimeText(time, sizeof(time), range_drag_time_);
+      ImGui::BeginTooltip();
+      DrawBackdrop();
+      ImGui::Text("%s  %s", range_drag_handle_ ? "Out" : "In", time);
+      ImGui::EndTooltip();
     }
     if (timeline_active_) {
       char time[32];
@@ -1208,11 +1967,17 @@ class EditorUi {
       Emit(send, "save_project");
     else if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_O, false))
       Emit(send, "load_project");
+    else if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_E, false) && demo_ && !keys_.empty())
+      Emit(send, "request_export");
     else if (!io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Space, false) &&
              !keys_.empty() && demo_)
       Emit(send, "preview", {{"playing", !playing_}, {"sync_demo", sync_demo_ && demo_}});
     else if (!io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_K, false))
       Capture(send);
+    else if (!io.KeyCtrl && !io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_I, false))
+      SetRangeBoundary(send, false);
+    else if (!io.KeyCtrl && !io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_O, false))
+      SetRangeBoundary(send, true);
     else if (ImGui::IsKeyPressed(ImGuiKey_Delete, false) && inspect_key_ && Selected())
       Emit(send, "remove_key", {{"id", selected_id_}});
   }

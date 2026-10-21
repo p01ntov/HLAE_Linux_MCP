@@ -1,10 +1,30 @@
 import unittest
+from pathlib import Path
+import tempfile
 
-from cs2_mvp.camera_backend import build_camera_sequence, build_static_camera_sequence, validate_motion_log
+from cs2_mvp.camera_backend import build_camera_sequence, build_static_camera_sequence, validate_motion_log, verify_cosmetics_capture_support
 from cs2_mvp.csdm import build_actions
 
 
 class CameraBackendTests(unittest.TestCase):
+    def test_cosmetic_capture_requires_both_application_and_restoration_support(self):
+        markers=[b"CS2_MVP_MOTION_ABI 3",b"CS2_MVP_ENVIRONMENT_ABI 1",b"CS2_MVP_COSMETICS_APPLIED",b"CS2_MVP_COSMETICS_RESTORED"]
+        with tempfile.TemporaryDirectory() as directory:
+            plugin=Path(directory)/"capture.so"
+            plugin.write_bytes(b"\x7fELF\x02\x01"+b"\0".join(markers))
+            self.assertEqual(verify_cosmetics_capture_support(plugin),plugin)
+            with self.assertRaisesRegex(RuntimeError,"glove pose"):
+                verify_cosmetics_capture_support(plugin,require_gloves=True)
+            plugin.write_bytes(plugin.read_bytes()+b"\0CS2_MVP_GLOVES_POSE_ABI 1\0")
+            with self.assertRaisesRegex(RuntimeError,"render publication"):
+                verify_cosmetics_capture_support(plugin,require_gloves=True)
+            plugin.write_bytes(plugin.read_bytes()+b"CS2_MVP_GLOVES_RENDER_ABI 1\0")
+            self.assertEqual(verify_cosmetics_capture_support(plugin,require_gloves=True),plugin)
+            for omitted in markers:
+                plugin.write_bytes(b"\x7fELF\x02\x01"+b"\0".join(marker for marker in markers if marker!=omitted))
+                with self.subTest(omitted=omitted),self.assertRaisesRegex(RuntimeError,"readback and restoration"):
+                    verify_cosmetics_capture_support(plugin)
+
     def test_actorless_capture_and_internal_control_order(self):
         base = build_actions(1000, 1064, '', 'camera_test', 120, camera_only=True)
         frames = [{'position': [1, 2, 3], 'angles': [0, 90]}] * 120
@@ -41,6 +61,24 @@ class CameraBackendTests(unittest.TestCase):
         self.assertEqual(validate_motion_log(animated,120,profile)['fov_override'],profile)
         with self.assertRaises(RuntimeError):
             validate_motion_log(animated.replace('min=35.000000','min=45.000000'),120,profile)
+
+    def test_motion_hook_accepts_only_one_allowlisted_client_build(self):
+        previous="d5bacd2f5df4a3a68fa8bee8692337993548e14a"
+        current="f1e04e3616921a3bb25940eea9b4b6bfd7ccada5"
+        prefix=("CS2_MVP_MOTION_ABI 3\nCS2_MVP_CAMERA_BEGIN expected=120 tick=1000\n"
+                "CS2_MVP_CAMERA_STAGE FRAME_START_LINUX_MAIN_VIEW\n")
+        suffix=("CS2_MVP_CAMERA_END applied=120 expected=120 callbacks=120 overflow=0 tick=1064 reason=camera_end\n"
+                "CS2_MVP_VIEW_END writes=120 fault=0 tick=1064\n")
+        def hook(build):
+            return "CS2_MVP_VIEW_HOOK linux_build="+build+"\n"
+        for build in (previous,current):
+            with self.subTest(build=build):
+                self.assertEqual(validate_motion_log(prefix+hook(build)+suffix,120)["client_build_id"],build)
+        for records in ("",hook("0"*40),hook("not-a-build-id"),hook(current)+hook(current),
+                        hook(previous)+hook(current),hook(current)+hook("0"*40),hook(current+"-extra"),
+                        hook(current)+hook("not-a-build-id"),hook(current)+hook("")):
+            with self.subTest(records=records),self.assertRaisesRegex(RuntimeError,"Late Linux main-view"):
+                validate_motion_log(prefix+records+suffix,120)
 
     def test_fov_survives_the_native_sidecar_boundary(self):
         base=build_actions(1000,1064,'','wide',120,camera_only=True)

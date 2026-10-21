@@ -15,9 +15,56 @@ from .camera import vector
 
 def _number(value, label, low, high):
     if (isinstance(value, bool) or not isinstance(value, (int, float))
-            or not math.isfinite(value) or not low <= value <= high):
+            or not low <= value <= high or not math.isfinite(value)):
         raise ValueError(f"Live project {label} must be finite and within {low}..{high}")
     return float(value)
+
+
+def normalize_render_range(value, duration):
+    """Validate saved temporal In/Out even when full composition is selected."""
+    if not isinstance(value, dict):
+        raise ValueError("Live project render_range must be an object")
+    unknown = set(value) - {"mode", "in", "out"}
+    if unknown:
+        raise ValueError(f"Unknown live project render_range field: {sorted(unknown)[0]}")
+    mode = value.get("mode", "composition")
+    if not isinstance(mode, str) or mode not in {"composition", "region"}:
+        raise ValueError("Live project render_range mode must be composition or region")
+    begin = _number(value.get("in", 0), "render In", 0, duration)
+    end = _number(value.get("out", duration), "render Out", 0, duration)
+    if end <= begin:
+        raise ValueError("Live project render Out must be greater than render In")
+    return {"mode": mode, "in": begin, "out": end}
+
+
+def select_render_range(project, start=None, end=None, scope=None):
+    """Resolve a native project into absolute demo ticks without trimming keys."""
+    track = LiveTrack(project)
+    if (start is None) != (end is None):
+        raise ValueError("Supply both --start and --end, or omit both for a live project")
+    if scope is not None and scope not in {"composition", "region"}:
+        raise ValueError("--render-scope must be composition or region")
+    if start is not None:
+        if scope is not None:
+            raise ValueError("--render-scope cannot be combined with explicit --start/--end ticks")
+        if any(isinstance(value, bool) or not isinstance(value, int) for value in (start, end)):
+            raise ValueError("Explicit demo bounds must be integer ticks")
+        requested_in, requested_out = (start-track.start_tick)/64, (end-track.start_tick)/64
+        chosen, source, quantization = "explicit", "cli_ticks", "explicit_ticks"
+    else:
+        chosen = scope or track.render_range["mode"]
+        requested_in = 0.0 if chosen == "composition" else track.render_range["in"]
+        requested_out = track.duration if chosen == "composition" else track.render_range["out"]
+        start = track.start_tick + math.floor(requested_in*64)
+        end = track.start_tick + math.ceil(requested_out*64)
+        source = "cli_scope" if scope else "saved_project" if "render_range" in project else "project_default"
+        quantization = "floor_in_ceil_out"
+    metadata = {"scope": chosen, "source": source, "project_start_tick": track.start_tick,
+                "tickrate": 64, "quantization": quantization,
+                "requested": {"in": requested_in, "out": requested_out},
+                "effective": {"in": (start-track.start_tick)/64, "out": (end-track.start_tick)/64,
+                              "start_tick": start, "end_tick": end}}
+    return start, end, metadata
 
 
 def _rotation(angles):
@@ -102,6 +149,7 @@ class LiveTrack:
                 or not 0 <= self.start_tick <= 2_000_000_000):
             raise ValueError("Live project start_tick must be an integer within 0..2000000000")
         self.duration = _number(project.get("duration", 5), "duration", .01, 86400)
+        self.render_range = normalize_render_range(project.get("render_range", {}), self.duration)
         self.interpolation = project.get("interpolation", "smooth")
         if not isinstance(self.interpolation, str) or self.interpolation not in {"linear", "smooth"}:
             raise ValueError("Live project interpolation must be linear or smooth")

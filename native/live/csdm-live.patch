@@ -1,18 +1,22 @@
 --- a/cs2-server-plugin/cs2-server-plugin/main.cpp
 +++ b/cs2-server-plugin/cs2-server-plugin/main.cpp
-@@ -12,6 +12,7 @@
- #include "cdll_interfaces.h"
- #include "motion_track.h"
+@@ -14,6 +14,10 @@
  #include "linux_view_patch.h"
+ #define CS2_CAMERA_SOURCE2_CVARS 1
+ #include "capture_environment.h"
 +#include "live_controller.h"
++#include "team_palette.h"
++#include "cosmetics_runtime.h"
++#include "presentation_runtime.h"
  #ifdef _WIN32
  #define SERVER_LIB_PATH "\\csgo\\bin\\win64\\server.dll"
  #else
-@@ -92,6 +93,14 @@
- std::queue<Sequence> sequences;
- cs2_mvp::MotionTrack motionTrack;
+@@ -96,6 +100,15 @@
  cs2_mvp::LinuxViewPatch viewPatch;
+ cs2_mvp::CaptureEnvironment captureEnvironment;
+ bool captureEnvironmentBound=false;
 +cs2_live::Controller liveController;
++cs2_live::LinuxHudPresentation hudPresentation;
 +
 +extern "C" __attribute__((visibility("default"))) const char* cs2_live_state_json() {
 +    static thread_local std::string state; state=liveController.StateJson(); return state.c_str();
@@ -23,7 +27,7 @@
  size_t viewWrites = 0;
  size_t fovWrites = 0;
  double lastFov = 0;
-@@ -322,6 +331,8 @@
+@@ -352,6 +365,8 @@
  }
  
  void LoadSequencesFile(string demoPath) {
@@ -32,7 +36,7 @@
      std::lock_guard<std::mutex> lock(sequencesMutex);
      sequences = {};
      EndCameraTrack(currentTick.load(), "load_demo");
-@@ -378,6 +389,15 @@
+@@ -409,6 +424,15 @@
  bool OverrideDemoView(void* view) {
      auto engine = GetEngine();
      const bool demo = engine != NULL && engine->IsPlayingDemo();
@@ -48,7 +52,7 @@
      if (viewOwnerThread.load() != 0 && viewOwnerThread.load() != gettid()) {
          if (!viewFault.exchange(true)) Log("CS2_MVP_CAMERA_ERROR main view runs on another thread");
          return demo;
-@@ -435,6 +455,40 @@
+@@ -469,6 +493,55 @@
      if (engine == NULL) {
          Log("Engine interface not found");
          originalFrameStageNotify(thisptr, stage);
@@ -59,6 +63,7 @@
 +    // and project mutations stay on this thread. Batch rendering is bypassed.
 +    if (liveController.Enabled()) {
 +        const bool playing=engine->IsPlayingDemo();
++        if(playing)demoPath=nullptr; // The startup fallback is consumed by the first successful demo.
 +        auto player=playing?engine->GetDemoPlayer():nullptr;
 +        static std::string liveHookError;
 +        static bool attemptedViewHook=false;
@@ -71,6 +76,20 @@
 +        }
 +        if (playing && !configuredDemo) {
 +            engine->ExecuteClientCmd(0,"sv_cheats 1",true);
++            liveController.SetSceneRegistry(cs2_live::Source2SceneRegistry());
++            liveController.SetEntityInspector([](unsigned limit){return cs2_live::Source2ClientEntityProbe::Inspect(factory,client,limit);});
++            try {liveController.SetAppearanceBackend(cs2_live::Source2AppearanceBackend(factory,
++                [engine](const std::string& command){engine->ExecuteClientCmd(0,command.c_str(),true);},
++                liveController.CanRefreshAppearance()?std::function<bool()>([]{return liveController.RequestAppearanceRefresh();}):std::function<bool()>{}));}
++            catch(const std::exception& error){Log("CS2_CAMERA_APPEARANCE_BIND_ERROR %s",error.what());}
++            try {liveController.SetCosmeticsBackend(cs2_live::Source2PlayerCosmetics::Bind(factory,client));}
++            catch(const std::exception& error){Log("CS2_CAMERA_COSMETICS_BIND_ERROR %s",error.what());}
++            liveController.SetPresentationBackend(cs2_live::Source2PresentationBackend(factory,client,hudPresentation,
++                [engine](const std::string& command){engine->ExecuteClientCmd(0,command.c_str(),true);}));
++            try {liveController.SetWeaponCosmeticsBackend(cs2_live::Source2WeaponCosmetics::Bind(factory,client));}
++            catch(const std::exception& error){Log("CS2_CAMERA_WEAPON_COSMETICS_BIND_ERROR %s",error.what());}
++            try {liveController.SetGloveCosmeticsBackend(cs2_live::Source2GloveCosmetics::Bind(factory,client));}
++            catch(const std::exception& error){Log("CS2_CAMERA_GLOVE_COSMETICS_BIND_ERROR %s",error.what());}
 +            configuredDemo=true;
 +        }
 +        if (!playing) configuredDemo=false;
@@ -89,12 +108,13 @@
          return;
      }
  
-@@ -704,7 +758,12 @@
-     UnhideCommandsAndCvars();
+@@ -753,7 +826,13 @@
      ConVar_Register();
+     Log("CS2_MVP_ENVIRONMENT_ABI 1");
  
 -    wsConnectionThread = new std::thread(ConnectToWebsocketServerLoop);
 +    if (liveController.Enabled()) {
++        liveController.SetSceneBackend(cs2_live::ReadSource2SceneCvar,cs2_live::WriteSource2SceneCvar);
 +        liveController.Start();
 +        Log("CS2_CAMERA_LIVE_ABI 1");
 +    } else {
@@ -103,20 +123,19 @@
  
      RestoreGameinfoFile();
  
-@@ -715,6 +774,7 @@
- void Shutdown()
+@@ -765,7 +844,15 @@
  {
      isQuitting = true;
+     RequireRestoreCaptureEnvironment("shutdown");
++    try {liveController.RestoreScene();}catch(const std::exception& error){Log("CS2_CAMERA_SCENE_RESTORE_ERROR %s",error.what());}
++    try {liveController.RestoreAppearance();}catch(const std::exception& error){Log("CS2_CAMERA_APPEARANCE_RESTORE_ERROR %s",error.what());}
++    try {liveController.RestoreGloveCosmetics();}catch(const std::exception& error){Log("CS2_CAMERA_GLOVE_COSMETICS_RESTORE_ERROR %s",error.what());}
++    try {liveController.RestoreCosmetics();}catch(const std::exception& error){Log("CS2_CAMERA_COSMETICS_RESTORE_ERROR %s",error.what());}
++    try {liveController.RestorePresentation();}catch(const std::exception& error){Log("CS2_CAMERA_PRESENTATION_RESTORE_ERROR %s",error.what());}
++    if(!hudPresentation.Remove())Log("CS2_CAMERA_PRESENTATION_RESTORE_ERROR HUD callsites could not be restored");
++    try {liveController.RestoreWeaponCosmetics();}catch(const std::exception& error){Log("CS2_CAMERA_WEAPON_COSMETICS_RESTORE_ERROR %s",error.what());}
 +    liveController.Stop();
+     if(!cs2_live::Source2GloveCosmetics::ShutdownRenderPhase())Log("CS2_MVP_GLOVES_RENDER_ERROR could not restore post-interpolation callsite");
      if (!viewPatch.Remove()) Log("CS2_MVP_CAMERA_ERROR could not restore main-view code");
  
      if (serverConfigShutdown != NULL) {
-@@ -776,7 +836,7 @@
-     originalClientFullyConnect(thisptr, playerSlot);
- }
- 
--EXPORT void* CreateInterface(const char* pName, int* pReturnCode)
-+extern "C" __attribute__((visibility("default"))) void* CreateInterface(const char* pName, int* pReturnCode)
- {
-     if (shouldDeleteLogFile) {
-         DeleteLogFile();

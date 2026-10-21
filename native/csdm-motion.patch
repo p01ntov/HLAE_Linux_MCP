@@ -1,39 +1,43 @@
 --- a/cs2-server-plugin/cs2-server-plugin/main.cpp
 +++ b/cs2-server-plugin/cs2-server-plugin/main.cpp
-@@ -10,6 +10,8 @@
+@@ -10,6 +10,10 @@
  #include <easywsclient.hpp>
  #include "icvar.h"
  #include "cdll_interfaces.h"
 +#include "motion_track.h"
 +#include "linux_view_patch.h"
++#define CS2_CAMERA_SOURCE2_CVARS 1
++#include "capture_environment.h"
  #ifdef _WIN32
  #define SERVER_LIB_PATH "\\csgo\\bin\\win64\\server.dll"
  #else
-@@ -58,15 +60,18 @@
- 
+@@ -58,15 +62,18 @@
+
  struct Sequence {
      std::vector<Action> actions;
 +    std::vector<cs2_mvp::CameraFrame> cameraFrames;
  };
- 
+
  typedef bool (*AppSystemConnectFn)(IAppSystem* appSystem, CreateInterfaceFn factory);
 +typedef InitReturnVal_t (*AppSystemInitFn)(IAppSystem* appSystem);
  typedef void (*AppSystemShutdownFn)();
  typedef void (*FrameStageNotifyFn)(void* thisptr, ClientFrameStage_t curStage);
  typedef void (*ClientFullyConnectFn)(void* thisptr, int playerSlot);
- 
+
  CreateInterfaceFn factory = NULL;
  AppSystemConnectFn serverConfigConnect = NULL;
 +AppSystemInitFn serverConfigInit = NULL;
  ClientFullyConnectFn originalClientFullyConnect = NULL;
  AppSystemShutdownFn serverConfigShutdown = NULL;
  CreateInterfaceFn serverCreateInterface = NULL;
-@@ -85,6 +90,16 @@
+@@ -85,6 +92,21 @@
  bool shouldDeleteLogFile = true;
  std::mutex sequencesMutex;
  std::queue<Sequence> sequences;
 +cs2_mvp::MotionTrack motionTrack;
 +cs2_mvp::LinuxViewPatch viewPatch;
++cs2_mvp::CaptureEnvironment captureEnvironment;
++bool captureEnvironmentBound=false;
 +size_t viewWrites = 0;
 +size_t fovWrites = 0;
 +double lastFov = 0;
@@ -42,18 +46,44 @@
 +std::atomic<int> viewOwnerThread{0};
 +bool viewLastLogged = false;
 +bool viewHoldAfterEnd = false;
++bool environmentRecording = false;
++std::atomic<bool> environmentAbortRequested{false};
++std::atomic<int> environmentTick{0};
  std::mutex pendingCommandsMutex;
  std::queue<std::string> pendingCommands;
  std::atomic<bool> captureInProgress{false};
-@@ -129,6 +144,70 @@
+@@ -129,6 +151,107 @@
      Plat_FatalError("%s", buf);
  }
- 
+
 +
 +// All camera state is owned by the game thread or protected by sequencesMutex.
 +// Applying these console commands is not an OverrideView hook. The existing
 +// FRAME_START callback is the frame clock; no wall clock or integer demo tick
 +// decides when to advance a camera sample.
++// Internal sidecar actions never pass user JSON to the engine console.
++void InitializeCaptureEnvironment(ISource2EngineToClient* engine) {
++    if(captureEnvironmentBound)return;
++    captureEnvironment.BindScene(cs2_live::ReadSource2SceneCvar,cs2_live::WriteSource2SceneCvar);
++    captureEnvironment.BindAppearance(cs2_live::Source2AppearanceBackend(factory,
++        [engine](const std::string& command){engine->ExecuteClientCmd(0,command.c_str(),true);}));
++    captureEnvironment.BindCosmetics(cs2_live::Source2PlayerCosmetics::Bind(factory,client),
++        cs2_live::Source2WeaponCosmetics::Bind(factory,client),cs2_live::Source2GloveCosmetics::Bind(factory,client));
++    captureEnvironmentBound=true;
++}
++void RestoreCaptureEnvironment(const char* reason) {
++    if(!captureEnvironmentBound)return;
++    captureEnvironment.Restore(environmentTick.load(),reason,[](const std::string& text){LogToFile(text.c_str());});
++    captureEnvironmentBound=false;environmentRecording=false;
++}
++bool RequireRestoreCaptureEnvironment(const char* reason) {
++    try {RestoreCaptureEnvironment(reason);return true;}
++    catch(const std::exception& error) {
++        Log("CS2_MVP_ENVIRONMENT_ERROR restore %s",error.what());
++        environmentAbortRequested=true;return false;
++    }
++}
++
 +void ApplyCameraFrame(ISource2EngineToClient* engine, int tick) {
 +    const size_t index = motionTrack.Callbacks();
 +    const auto& frame = motionTrack.Next();
@@ -84,6 +114,19 @@
 +    if (viewHoldAfterEnd) Log("CS2_MVP_VIEW_HOLD tick=%d reason=%s",tick,reason);
 +}
 +
++// Expected preflight/readback failures must not enter Plat_FatalError's
++// blocking SDL dialog. Record failure, stop recording and leave the process.
++void AbortCaptureEnvironment(ISource2EngineToClient* engine,int tick,const char* phase,const std::string& error) {
++    Log("CS2_MVP_ENVIRONMENT_ERROR phase=%s %s",phase,error.c_str());
++    environmentTick=tick;environmentAbortRequested=true;
++    if(environmentRecording && engine)engine->ExecuteClientCmd(0,"endmovie",true);
++    environmentRecording=false;
++    EndCameraTrack(tick,"capture_error");
++    RequireRestoreCaptureEnvironment("capture_error");
++    isQuitting=true;demoPath=nullptr;
++    if(engine)engine->ExecuteClientCmd(0,"quit",true);
++}
++
 +std::vector<cs2_mvp::CameraFrame> ReadCameraFrames(const json& input) {
 +    try {
 +        if (!input.is_array() || input.empty() || input.size() > 1000000) {
@@ -108,26 +151,28 @@
 +        }
 +        return frames;
 +    } catch (const std::exception& error) {
-+        PluginError("CS2_MVP_CAMERA_ERROR invalid camera frames: %s", error.what());
++        Log("CS2_MVP_CAMERA_ERROR invalid camera frames: %s", error.what());
++        environmentAbortRequested=true;
 +        return {};
 +    }
 +}
 +
  inline bool FileExists(const std::string& name) {
      std::ifstream f(name.c_str());
- 
-@@ -250,6 +329,7 @@
+
+@@ -250,6 +373,8 @@
  void LoadSequencesFile(string demoPath) {
      std::lock_guard<std::mutex> lock(sequencesMutex);
      sequences = {};
 +    EndCameraTrack(currentTick.load(), "load_demo");
- 
++    if(!RequireRestoreCaptureEnvironment("load_demo"))return;
+
      string demoJsonPath = demoPath + ".json";
      if (FileExists(demoJsonPath)) {
-@@ -257,7 +337,15 @@
+@@ -257,7 +382,15 @@
          std::ifstream jsonFile(demoJsonPath);
          json jsonSequences = json::parse(jsonFile);
- 
+
 -        std::istringstream stream(jsonSequences.dump(2));
 +        // Preserve action diagnostics without dumping megabytes of camera samples.
 +        json logSequences = jsonSequences;
@@ -141,7 +186,7 @@
          string line;
          while (std::getline(stream, line)) {
              Log("%s", line.c_str());
-@@ -271,6 +359,10 @@
+@@ -271,6 +404,10 @@
          Log("Loading %d sequences", jsonSequences.size());
          for (auto jsonSequence : jsonSequences) {
              Sequence sequence;
@@ -152,10 +197,10 @@
              for (auto jsonAction : jsonSequence["actions"]) {
                  Action action;
                  action.tick = jsonAction["tick"];
-@@ -288,10 +380,57 @@
+@@ -288,10 +425,57 @@
      }
  }
- 
+
 +bool OverrideDemoView(void* view) {
 +    auto engine = GetEngine();
 +    const bool demo = engine != NULL && engine->IsPlayingDemo();
@@ -209,22 +254,53 @@
 +        }
          return;
      }
- 
-@@ -367,6 +506,10 @@
- 
+
+@@ -316,6 +500,11 @@
+             engine->ExecuteClientCmd(0, cmd.c_str(), true);
+             Log("Executed queued command: %s", cmd.c_str());
+         }
++    }
++
++    if(environmentAbortRequested || viewFault) {
++        AbortCaptureEnvironment(engine,environmentTick.load(),"pending_error","capture setup or view readback previously failed");
++        originalFrameStageNotify(thisptr,stage);return;
+     }
+
+     // Workaround to start demo playback when Steam is in offline mode, the +playdemo launch option doesn't work in this case.
+@@ -353,6 +542,7 @@
+     }
+
+     int newTick = demo->GetDemoTick();
++    environmentTick=newTick;
+     bool newIsPlayingDemo = engine->IsPlayingDemo();
+     {
+         if (newIsPlayingDemo && !isPlayingDemo) {
+@@ -367,6 +557,11 @@
+
      isPlayingDemo = newIsPlayingDemo;
      if (!isPlayingDemo) {
 +        {
 +            std::lock_guard<std::mutex> lock(sequencesMutex);
 +            EndCameraTrack(newTick, "playback_stopped");
++            RequireRestoreCaptureEnvironment("playback_stopped");
 +        }
          originalFrameStageNotify(thisptr, stage);
          return;
      }
-@@ -394,7 +537,35 @@
+@@ -394,7 +589,53 @@
                      Log("[%d] Resuming demo playback", newTick);
                      engine->ExecuteClientCmd(0, "demo_resume", true);
                  }
++                else if (cs2_mvp::CaptureEnvironment::IsAction(action.cmd)) {
++                    try {
++                        InitializeCaptureEnvironment(engine);
++                        captureEnvironment.Handle(action.cmd,newTick,[](const std::string& text){LogToFile(text.c_str());});
++                    } catch(const std::exception& error) {
++                        Log("CS2_MVP_ENVIRONMENT_ERROR %s",error.what());
++                        AbortCaptureEnvironment(engine,newTick,"action_error",error.what());
++                        originalFrameStageNotify(thisptr,stage);return;
++                    }
++                }
 +                else if (action.cmd == "camera_begin") {
 +                    try {
 +                        if (motionTrack.Active()) {
@@ -236,41 +312,75 @@
 +                        viewHoldAfterEnd=false;
 +                        motionTrack.Begin(currentSequence.cameraFrames);
 +                    } catch (const std::exception& error) {
-+                        PluginError("CS2_MVP_CAMERA_ERROR %s", error.what());
++                        Log("CS2_MVP_CAMERA_ERROR %s",error.what());
++                        AbortCaptureEnvironment(engine,newTick,"camera_begin",error.what());
++                        originalFrameStageNotify(thisptr,stage);return;
 +                    }
 +                    engine->ExecuteClientCmd(0, "spec_autodirector 0", true);
 +                    Log("CS2_MVP_CAMERA_BEGIN expected=%zu tick=%d", motionTrack.Expected(), newTick);
 +                    Log("CS2_MVP_CAMERA_STAGE FRAME_START_LINUX_MAIN_VIEW");
-+                    Log("CS2_MVP_VIEW_HOOK linux_build=d5bacd2f5df4a3a68fa8bee8692337993548e14a origin=0x4a0 angles=0x4b8");
++                    Log("CS2_MVP_VIEW_HOOK linux_build=%s origin=0x4a0 angles=0x4b8",viewPatch.LoadedBuildId());
 +                    // Seed without consuming a sample. Post-FRAME_START owns the clock.
 +                    const string seed = currentSequence.cameraFrames.front().Command();
 +                    if (!viewPatch.Installed()) engine->ExecuteClientCmd(0, seed.c_str(), true);
 +                }
 +                else if (action.cmd == "camera_end") {
 +                    if (!motionTrack.Active()) {
-+                        PluginError("CS2_MVP_CAMERA_ERROR camera_end without camera_begin");
++                        Log("CS2_MVP_CAMERA_ERROR camera_end without camera_begin");
++                        AbortCaptureEnvironment(engine,newTick,"camera_end","camera_end without camera_begin");
++                        originalFrameStageNotify(thisptr,stage);return;
 +                    }
 +                    EndCameraTrack(newTick, "camera_end");
 +                }
                  else if (action.cmd == "go_to_next_sequence") {
 +                    EndCameraTrack(newTick, "next_sequence");
++                    if(!RequireRestoreCaptureEnvironment("next_sequence")) {
++                        AbortCaptureEnvironment(engine,newTick,"next_sequence","original environment restoration was refused");
++                        originalFrameStageNotify(thisptr,stage);return;
++                    }
                      Log("[%d] Going to next sequence, remaining sequences: %d", newTick, sequences.size() - 1);
                      sequences.pop();
                      engine->ExecuteClientCmd(0, "demo_gototick 0", true);
-@@ -413,6 +584,9 @@
+@@ -402,6 +643,17 @@
+                     break;
+                 }
+                 else {
++                    if(action.cmd.rfind("startmovie ",0)==0) {
++                        try {captureEnvironment.BeforeMovie(newTick,[](const std::string& text){LogToFile(text.c_str());});}
++                        catch(const std::exception& error) {
++                            Log("CS2_MVP_ENVIRONMENT_ERROR before_movie %s",error.what());
++                            AbortCaptureEnvironment(engine,newTick,"before_movie_error",error.what());
++                            originalFrameStageNotify(thisptr,stage);return;
++                        }
++                        environmentRecording=true;
++                    }
++                    if(action.cmd=="endmovie")environmentRecording=false;
++                    if(action.cmd=="quit")RequireRestoreCaptureEnvironment("quit_after_flush");
+                     Log("[%d] Executing: %s", newTick, action.cmd.c_str());
+                     engine->ExecuteClientCmd(0, action.cmd.c_str(), true);
+                     Log("[%d] Executed: %s", newTick, action.cmd.c_str());
+@@ -413,6 +665,17 @@
      currentTick = newTick;
- 
+
      originalFrameStageNotify(thisptr, stage);
++    if (!isQuitting && captureEnvironmentBound) {
++        try {captureEnvironment.Frame(newTick,environmentRecording,[](const std::string& text){LogToFile(text.c_str());});}
++        catch(const std::exception& error) {
++            Log("CS2_MVP_ENVIRONMENT_ERROR frame %s",error.what());
++            AbortCaptureEnvironment(engine,newTick,"frame_error",error.what());
++            return;
++        }
++    }
 +    if (!isQuitting && motionTrack.Active()) {
 +        ApplyCameraFrame(engine, newTick);
 +    }
  }
- 
+
  void HandleWebSocketMessage(const std::string& message)
-@@ -502,6 +676,32 @@
+@@ -502,6 +765,32 @@
      }
  }
- 
+
 +bool TryHookFrame(const char* phase) {
 +    if (client != NULL) return true;
 +    if (factory) client = static_cast<ISource2Client*>(factory("Source2Client002",NULL));
@@ -300,18 +410,28 @@
  bool Connect(IAppSystem* appSystem, CreateInterfaceFn factoryFn)
  {
      factory = factoryFn;
-@@ -524,6 +724,7 @@
+@@ -512,6 +801,7 @@
+     // Also required to use the startmovie command.
+     UnhideCommandsAndCvars();
+     ConVar_Register();
++    Log("CS2_MVP_ENVIRONMENT_ABI 1");
+
+     wsConnectionThread = new std::thread(ConnectToWebsocketServerLoop);
+
+@@ -524,6 +814,9 @@
  void Shutdown()
  {
      isQuitting = true;
++    RequireRestoreCaptureEnvironment("shutdown");
++    if(!cs2_live::Source2GloveCosmetics::ShutdownRenderPhase())Log("CS2_MVP_GLOVES_RENDER_ERROR could not restore post-interpolation callsite");
 +    if (!viewPatch.Remove()) Log("CS2_MVP_CAMERA_ERROR could not restore main-view code");
- 
+
      if (serverConfigShutdown != NULL) {
          serverConfigShutdown();
-@@ -574,17 +775,8 @@
+@@ -574,17 +866,8 @@
          return;
      }
- 
+
 -    // Hook FrameStageNotify to call engine commands from the engine thread since it's not thread safe to call engine
 -    // commands from another thread.
 -    client = (ISource2Client*)factory("Source2Client002", NULL);
@@ -328,7 +448,12 @@
      // Since the 23/05/2024 CS2 update, the demo playback UI is displayed by default.
      // We have to set the demo_ui_mode convar to 0 before starting the playback prevent the UI from being displayed.
      QueueEngineCommand("demo_ui_mode 0");
-@@ -597,6 +789,7 @@
+@@ -593,10 +876,11 @@
+     originalClientFullyConnect(thisptr, playerSlot);
+ }
+
+-EXPORT void* CreateInterface(const char* pName, int* pReturnCode)
++extern "C" __attribute__((visibility("default"))) void* CreateInterface(const char* pName, int* pReturnCode)
  {
      if (shouldDeleteLogFile) {
          DeleteLogFile();
@@ -336,7 +461,7 @@
          shouldDeleteLogFile = false;
      }
      
-@@ -629,12 +822,18 @@
+@@ -629,12 +913,18 @@
      {
          serverConfigConnect = (AppSystemConnectFn)vtable[0];
          serverConfigShutdown = (AppSystemShutdownFn)vtable[4];
@@ -353,5 +478,5 @@
 +        // the frame clock here rather than depending on that later callback.
 +        TryHookFrame("GameClientsInterface");
      }
- 
+
      if (demoPath == NULL) {

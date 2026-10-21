@@ -28,7 +28,11 @@ import uuid
 MAX_MESSAGE = 1024 * 1024
 LIVE_METHODS = frozenset({"get_state", "set_camera", "release_camera", "add_key", "update_key",
                           "remove_key", "set_project", "scrub", "preview", "demo_control",
-                          "apply_preset", "undo", "redo", "export_project", "import_project"})
+                          "apply_preset", "undo", "redo", "export_project", "import_project", "set_scene", "reset_scene",
+                          "apply_appearance_pack", "reset_appearance", "probe_appearance_pack", "request_export", "inspect_entities",
+                          "set_player_cosmetics", "reset_player_cosmetics", "set_team_palette", "reset_team_palette",
+                          "set_presentation", "set_player_weapon_paint", "reset_player_weapon_paint",
+                          "set_player_gloves", "reset_player_gloves"})
 
 
 class LiveError(RuntimeError):
@@ -79,6 +83,19 @@ def installed_game_fonts(game: Path) -> dict[str, str]:
     fonts = {"CS2_CAMERA_GAME_FONT": directory / "notosans-regular.ttf",
              "CS2_CAMERA_MONO_FONT": directory / "stratum2regular_monodigit.ttf"}
     return {variable: str(path.absolute()) for variable, path in fonts.items() if path.is_file()}
+
+
+def staged_cosmetics_environment(game: Path, run: Path, notify) -> dict[str, str]:
+    """Keep camera sessions usable when an installed cosmetic schema changes."""
+    from .cosmetics_catalog import stage_catalog
+    notify("Reading the installed game's builtin cosmetic catalog…")
+    try:
+        path = stage_catalog(game, run / "cosmetics-catalog.json")
+    except Exception as error:
+        reason = f"{type(error).__name__}: {error}"[:2048]
+        notify("Builtin cosmetics are unavailable: " + reason)
+        return {"CS2_CAMERA_COSMETICS_CATALOG_ERROR": reason}
+    return {"CS2_CAMERA_COSMETICS_CATALOG": str(path)}
 
 
 def runtime_directory() -> Path:
@@ -159,7 +176,7 @@ class NativeClient:
             raise LiveError("Camera request exceeds 1 MiB")
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-                connection.settimeout(self.timeout)
+                connection.settimeout(max(self.timeout, 35) if method in {"apply_appearance_pack", "reset_appearance", "probe_appearance_pack"} else self.timeout)
                 connection.connect(path)
                 if hasattr(socket, "SO_PEERCRED"):
                     _, peer_uid, _ = struct.unpack("3i", connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
@@ -378,7 +395,7 @@ def _stop_owned(process: subprocess.Popen, demo_link: Path, tracker: OwnedProces
 def run_session(demo: Path, *, game_dir: str | None = None, plugin: Path | None = None,
                 overlay: Path | None = None, headless: bool = False,
                 stop: threading.Event | None = None, notify=None, windowed: bool = False,
-                screen_size: tuple[int, int] | None = None) -> dict:
+                screen_size: tuple[int, int] | None = None, on_ready=None) -> dict:
     from .csdm import temporary_plugin
     from .discovery import find_game, find_runtime, process_ids, sha256
     from .render import config_backup
@@ -421,8 +438,12 @@ def run_session(demo: Path, *, game_dir: str | None = None, plugin: Path | None 
         profile.mkdir()
         projects = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / "cs2-camera/projects"
         projects.mkdir(parents=True, mode=0o700, exist_ok=True)
+        for variable in ("CS2_CAMERA_COSMETICS_CATALOG", "CS2_CAMERA_COSMETICS_CATALOG_ERROR"):
+            environment.pop(variable, None)
+        environment.update(staged_cosmetics_environment(game, run, notify))
         environment.update({"SteamAppId": "730", "SteamGameId": "730", "USRLOCALCSGO": str(profile),
                             "CS2_CAMERA_LIVE": "1", "CS2_CAMERA_SOCKET": str(socket_path),
+                            "CS2_CAMERA_DEMO_PATH": str(demo_link),
                             "CS2_CAMERA_PROJECT": str(projects / "last-project.json"),
                             "CS2_CAMERA_HOTKEYS": str(hotkey_configuration())})
         if overlay:
@@ -449,7 +470,7 @@ def run_session(demo: Path, *, game_dir: str | None = None, plugin: Path | None 
             environment["LD_PRELOAD"] = ":".join(filter(None, (str(overlay), environment.get("LD_PRELOAD"))))
             environment["VK_ADD_LAYER_PATH"] = ":".join(filter(None, (str(overlay.parent), environment.get("VK_ADD_LAYER_PATH"))))
             environment["VK_INSTANCE_LAYERS"] = ":".join(filter(None, ("VK_LAYER_CS2_camera", environment.get("VK_INSTANCE_LAYERS"))))
-        descriptor = {"version": 1, "pid": os.getpid(), "socket": str(socket_path), "demo": str(demo),
+        descriptor = {"version": 1, "pid": os.getpid(), "socket": str(socket_path), "demo": str(demo), "game_directory": str(game),
                       "run_directory": str(run), "status": "starting", "insecure": True, "overlay": bool(overlay)}
         descriptor_path = runtime_directory() / "session.json"
         process = None
@@ -475,14 +496,19 @@ def run_session(demo: Path, *, game_dir: str | None = None, plugin: Path | None 
                             if not ready and socket_path.exists():
                                 try:
                                     state = client.request("get_state")
-                                    if state.get("camera_valid") and state.get("view_hook_installed"):
-                                        ready = True
-                                        descriptor["status"] = "ready"
-                                        _write_json(descriptor_path, descriptor)
-                                        _write_json(run / "session.json", descriptor)
-                                        notify("Editor connected. Use the in-game camera panel; the session stays open for repeated previews.")
                                 except LiveError:
-                                    pass
+                                    state = None
+                                if (state and state.get("camera_valid") and not state.get("view_hook_installed")
+                                        and isinstance(state.get("error"), str) and state["error"].strip()):
+                                    raise LiveError(f"Native camera hook unavailable: {state['error']}. See {run / 'game.log'}")
+                                if state and state.get("camera_valid") and state.get("view_hook_installed"):
+                                    if on_ready:
+                                        on_ready(client)
+                                    ready = True
+                                    descriptor["status"] = "ready"
+                                    _write_json(descriptor_path, descriptor)
+                                    _write_json(run / "session.json", descriptor)
+                                    notify("Editor connected. Use the in-game camera panel; the session stays open for repeated previews.")
                             if ready and time.monotonic() - last_checkpoint > 30:
                                 last_checkpoint = time.monotonic()
                                 try:
@@ -535,15 +561,21 @@ def run_session(demo: Path, *, game_dir: str | None = None, plugin: Path | None 
 def graphical_launcher(args) -> int:
     """Optional Qt shell; the shipped AppImage includes this runtime."""
     try:
-        from PySide6 import QtCore, QtWidgets
+        from PySide6 import QtCore, QtGui, QtWidgets
     except ImportError as error:
         raise LiveError("The desktop launcher requires PySide6-Essentials. From source, pass --demo FILE --no-launcher, or use the AppImage.") from error
     app = QtWidgets.QApplication([sys.argv[0]])
     app.setApplicationName("CS2 Camera Studio")
     app.setOrganizationName("CS2 Camera Studio")
+    font = bundled_font()
+    if font:
+        font_id = QtGui.QFontDatabase.addApplicationFont(str(font))
+        families = QtGui.QFontDatabase.applicationFontFamilies(font_id)
+        if families:
+            app.setFont(QtGui.QFont(families[0], 10))
     window = QtWidgets.QMainWindow()
     window.setWindowTitle("CS2 Camera Studio · Live")
-    window.resize(700, 450)
+    window.resize(760, 620)
     body, layout = QtWidgets.QWidget(), QtWidgets.QVBoxLayout()
     body.setLayout(layout)
     window.setCentralWidget(body)
@@ -554,51 +586,182 @@ def graphical_launcher(args) -> int:
     description = QtWidgets.QLabel("Open a local demo once. Build and preview camera paths inside CS2.\nLocal -insecure session · edit and repeat without restarting.")
     description.setWordWrap(True)
     layout.addWidget(description)
+    library_row = QtWidgets.QHBoxLayout()
+    library_label = QtWidgets.QLabel("Downloaded demos")
+    refresh_library_button = QtWidgets.QPushButton("Refresh")
+    refresh_library_button.setObjectName("refresh_demo_library")
+    library_row.addWidget(library_label, 1)
+    library_row.addWidget(refresh_library_button)
+    layout.addLayout(library_row)
+    demo_library = QtWidgets.QComboBox()
+    demo_library.setObjectName("demo_library")
+    demo_library.setMinimumContentsLength(30)
+    demo_library.setSizeAdjustPolicy(QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+    demo_library.addItem("Searching installed Steam libraries…", None)
+    layout.addWidget(demo_library)
+    library_status = QtWidgets.QLabel("Checking Steam libraries and mounted disks")
+    library_status.setWordWrap(True)
+    layout.addWidget(library_status)
     row = QtWidgets.QHBoxLayout()
     demo_edit = QtWidgets.QLineEdit(str(args.demo or ""))
+    demo_edit.setObjectName("demo_path")
     demo_edit.setPlaceholderText("Choose a .dem recording")
     choose = QtWidgets.QPushButton("Browse…")
     row.addWidget(demo_edit, 1)
     row.addWidget(choose)
     layout.addLayout(row)
     game_edit = QtWidgets.QLineEdit(args.game_dir or "")
+    game_edit.setObjectName("game_directory")
     game_edit.setPlaceholderText("CS2 game directory · auto-detect")
     layout.addWidget(game_edit)
     fullscreen = QtWidgets.QCheckBox("Fullscreen Windowed · match desktop size")
     fullscreen.setChecked(not args.windowed)
     layout.addWidget(fullscreen)
     session_status = QtWidgets.QLabel("Ready to launch · Fullscreen Windowed")
+    session_status.setWordWrap(True)
     layout.addWidget(session_status)
     log_box = QtWidgets.QPlainTextEdit()
     log_box.setReadOnly(True)
     layout.addWidget(log_box, 1)
     buttons = QtWidgets.QHBoxLayout()
     start_button, stop_button = QtWidgets.QPushButton("OPEN DEMO + EDITOR"), QtWidgets.QPushButton("END SESSION")
+    export_button = QtWidgets.QPushButton("EXPORT VIDEO…")
+    export_button.setEnabled(False)
     start_button.setObjectName("primary")
     stop_button.setEnabled(False)
     buttons.addWidget(start_button, 1)
+    buttons.addWidget(export_button)
     buttons.addWidget(stop_button)
     layout.addLayout(buttons)
     window.setStyleSheet("""
-        QMainWindow,QWidget { background: #20221f; color: #e5e5d9; font: 13px 'DejaVu Sans'; }
-        QLabel#title { font-size: 19px; font-weight: 600; color: #e8bd57; margin-bottom: 10px; }
-        QLineEdit,QPlainTextEdit { background: #151714; border: 1px solid #555646; padding: 9px; }
-        QPushButton { background: #3b3d32; border: 1px solid #62634e; padding: 11px; }
-        QPushButton:hover { background: #515342; }
-        QPushButton#primary { background: #a98532; color: #10130e; font-weight: 700; }
-        QPushButton:disabled { color: #77796c; background: #272a24; }
+        QMainWindow,QWidget { background: #292929; color: #cccccc; font-size: 13px; }
+        QLabel#title { font-size: 19px; font-weight: 600; color: #eeeeee; margin-bottom: 10px; }
+        QLineEdit,QPlainTextEdit,QComboBox,QSpinBox { background: #202020; border: 1px solid #555555; padding: 7px; }
+        QPushButton { background: #383838; border: 1px solid #666666; min-height: 36px; padding: 0 12px; }
+        QPushButton:hover { background: #484848; border-color: #aaaaaa; }
+        QPushButton#primary { background: #454545; color: #eeeeee; font-weight: 600; }
+        QPushButton:disabled { color: #777777; background: #303030; }
+        QProgressBar { border: 1px solid #666666; background: #202020; min-height: 7px; }
+        QProgressBar::chunk { background: #bcbcbc; }
     """)
     events, stop_event = queue.Queue(), threading.Event()
     worker = None
     closing = False
+    generation = 0
+    session_result = {}
+    latest_state = None
+    seen_export = 0
+    exporting = False
+    export_dialog = None
+    export_job = None
+    monitor_stop = threading.Event()
+    library_loading = False
+    game_directory_edited = bool(args.game_dir)
+    selection_controls = (choose, demo_edit, game_edit, fullscreen, demo_library, refresh_library_button)
+
+    from .export_ui import create_export_dialog, perform_export, restore_export_snapshot
+
+    class ExportWorker(QtCore.QThread):
+        progress = QtCore.Signal(object)
+
+        def __init__(self, options, dialog, thread, result, demo, game):
+            super().__init__(window)
+            self.options, self.dialog, self.thread, self.result, self.demo, self.game = options, dialog, thread, result, demo, game
+
+        def run(self):
+            def wait():
+                self.thread.join(timeout=120)
+                if self.thread.is_alive():
+                    raise LiveError("The live session has not fully stopped; capture was not launched")
+                if self.result.get("error"):
+                    raise LiveError("Live session restoration failed: " + self.result["error"])
+            self.outcome = perform_export(self.options, demo=self.demo, game_dir=self.game, client=NativeClient(),
+                                    stop_session=stop_event.set, wait_session=wait,
+                                    cancel_event=self.dialog.cancel_event, notify=self.progress.emit)
+
+    def select_library_demo(index):
+        item = demo_library.itemData(index)
+        if item and item.get("ready"):
+            demo_edit.setText(item["path"])
+            if not game_directory_edited:
+                game_edit.setText(item["game_directory"])
+
+    def mark_game_directory_edited():
+        nonlocal game_directory_edited
+        game_directory_edited = bool(game_edit.text().strip())
+
+    def refresh_demo_library():
+        nonlocal library_loading
+        if library_loading:
+            return
+        library_loading = True
+        refresh_library_button.setEnabled(False)
+        library_status.setText("Checking Steam libraries and mounted disks…")
+        explicit = game_edit.text().strip() if game_directory_edited else None
+        def scan():
+            from .discovery import discover_demos, find_games
+            try:
+                games = find_games(explicit)
+                value = {"games": [str(path) for path in games], "demos": discover_demos(games)}
+            except Exception as error:
+                value = {"games": [], "demos": [], "error": str(error)}
+            events.put(("library", (None, value)))
+        threading.Thread(target=scan, name="cs2-demo-library", daemon=True).start()
+
+    def populate_demo_library(value):
+        nonlocal library_loading
+        library_loading = False
+        active = bool(worker and worker.is_alive()) or exporting
+        refresh_library_button.setEnabled(not active)
+        demo_library.blockSignals(True)
+        demo_library.clear()
+        selected = -1
+        for item in value["demos"]:
+            stamp = datetime.fromtimestamp(item["modified"]).strftime("%d %b %Y · %H:%M")
+            label = (item.get("map_name") + " · " if item.get("map_name") else "")
+            label += f"{stamp} · {item['size']/1024**2:.0f} MiB · {item['filename']}"
+            if not item["ready"]:
+                label += " · incomplete / unsupported"
+            demo_library.addItem(label, item)
+            index = demo_library.count()-1
+            demo_library.setItemData(index, item["path"], QtCore.Qt.ItemDataRole.ToolTipRole)
+            if not item["ready"]:
+                demo_library.model().item(index).setEnabled(False)
+            if demo_edit.text().strip() == item["path"]:
+                selected = index
+        if not value["demos"]:
+            demo_library.addItem("No downloaded .dem files found · use Browse…", None)
+        if selected<0 and demo_edit.text().strip():
+            demo_library.insertItem(0,"Selected file outside library · "+Path(demo_edit.text()).name,None)
+            demo_library.setItemData(0,demo_edit.text(),QtCore.Qt.ItemDataRole.ToolTipRole)
+            selected=0
+        if selected < 0:
+            selected = next((index for index in range(demo_library.count()) if demo_library.itemData(index) and demo_library.itemData(index)["ready"]), 0)
+        demo_library.setCurrentIndex(selected)
+        demo_library.blockSignals(False)
+        if not active and not demo_edit.text().strip():
+            select_library_demo(selected)
+        if not active and value["games"] and not game_directory_edited and not game_edit.text().strip():
+            game_edit.setText(value["games"][0])
+        ready = sum(item["ready"] for item in value["demos"])
+        library_status.setText(value.get("error") or (f"{ready} ready demos · CS2: " + value["games"][0] if value["games"] else "CS2 was not found in Steam libraries. Choose its game directory or use Browse…"))
 
     def browse():
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(window, "Open CS2 demo", str(Path.home()), "CS2 demos (*.dem)")
+        initial = Path(game_edit.text())/"csgo/replays" if game_edit.text().strip() else Path.home()
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(window, "Open CS2 demo", str(initial), "CS2 demos (*.dem)")
         if path:
             demo_edit.setText(path)
+            demo_library.blockSignals(True)
+            match=next((index for index in range(demo_library.count()) if demo_library.itemData(index) and demo_library.itemData(index).get("path")==path),None)
+            if match is None:
+                demo_library.insertItem(0,"Selected file outside library · "+Path(path).name,None)
+                demo_library.setItemData(0,path,QtCore.Qt.ItemDataRole.ToolTipRole)
+                match=0
+            demo_library.setCurrentIndex(match)
+            demo_library.blockSignals(False)
 
-    def launch():
-        nonlocal worker
+    def launch(checked=False, resume=None):
+        nonlocal worker, generation, session_result, latest_state, seen_export
         if worker and worker.is_alive():
             return
         if not demo_edit.text().strip():
@@ -606,9 +769,15 @@ def graphical_launcher(args) -> int:
             if not demo_edit.text().strip():
                 return
         stop_event.clear()
+        generation += 1
+        current_generation = generation
+        latest_state, seen_export = None, 0
+        result_holder = {}
+        session_result = result_holder
         start_button.setEnabled(False)
         stop_button.setEnabled(True)
-        choose.setEnabled(False)
+        for control in selection_controls:
+            control.setEnabled(False)
         demo_path, game_path = Path(demo_edit.text()), game_edit.text().strip() or None
         windowed = not fullscreen.isChecked()
         screen = window.screen() or app.primaryScreen()
@@ -620,11 +789,18 @@ def graphical_launcher(args) -> int:
             screen_size = desktop_size()
         def run():
             try:
+                def ready(client):
+                    if resume:
+                        events.put(("status", (current_generation, "Restoring the saved camera project and appearance…")))
+                        restore_export_snapshot(client, resume)
                 result = run_session(demo_path, game_dir=game_path, plugin=args.plugin, overlay=args.overlay,
-                                     headless=args.headless, stop=stop_event, windowed=windowed, screen_size=screen_size, notify=lambda message: events.put(("status", message)))
-                events.put(("done", result))
+                                     headless=args.headless, stop=stop_event, windowed=windowed, screen_size=screen_size,
+                                     on_ready=ready, notify=lambda message: events.put(("status", (current_generation, message))))
+                result_holder["result"] = result
+                events.put(("done", (current_generation, result)))
             except BaseException as error:
-                events.put(("error", str(error)))
+                result_holder["error"] = str(error)
+                events.put(("error", (current_generation, str(error))))
         worker = threading.Thread(target=run, name="cs2-live-session", daemon=False)
         worker.start()
 
@@ -633,30 +809,111 @@ def graphical_launcher(args) -> int:
         stop_button.setEnabled(False)
         session_status.setText("Ending session…")
 
+    def open_export():
+        nonlocal export_dialog
+        if exporting or not worker or not worker.is_alive() or not latest_state:
+            return
+        if export_dialog and export_dialog.isVisible():
+            export_dialog.raise_()
+            export_dialog.activateWindow()
+            return
+        export_dialog = create_export_dialog(window, latest_state.get("project", {}), start_export=start_export)
+        export_dialog.show()
+        export_dialog.raise_()
+        export_dialog.activateWindow()
+
+    def start_export(dialog, options):
+        nonlocal export_job, exporting
+        if not worker or not worker.is_alive():
+            dialog.complete({"error": "The live session is no longer running"})
+            return
+        exporting = True
+        export_button.setEnabled(False)
+        stop_button.setEnabled(False)
+        export_job = ExportWorker(options, dialog, worker, session_result, Path(demo_edit.text()), game_edit.text().strip() or None)
+        export_job.progress.connect(dialog.report)
+        export_job.progress.connect(lambda value: session_status.setText(value.get("message", "Exporting…")))
+        job = export_job
+        export_job.finished.connect(lambda: export_done(dialog, options, job.outcome))
+        export_job.finished.connect(export_job.deleteLater)
+        export_job.start()
+
+    def export_done(dialog, options, outcome):
+        nonlocal exporting
+        exporting = False
+        dialog.complete(outcome)
+        message = "Export complete" if outcome.get("plan") else outcome.get("error", "Export stopped")
+        log_box.appendPlainText(message)
+        session_status.setText(message)
+        if options.reopen and outcome.get("stopped") and outcome.get("snapshot") and not closing:
+            launch(resume=outcome["snapshot"])
+        else:
+            active = bool(worker and worker.is_alive())
+            start_button.setEnabled(not active)
+            stop_button.setEnabled(active)
+            export_button.setEnabled(active and bool(latest_state))
+            for control in selection_controls:
+                control.setEnabled(not active)
+            refresh_library_button.setEnabled(not active and not library_loading)
+
+    def monitor():
+        client = NativeClient(timeout=.4)
+        while not monitor_stop.wait(.5):
+            if worker and worker.is_alive() and not exporting:
+                snapshot_generation = generation
+                try:
+                    state = client.request("get_state")
+                    events.put(("state", (snapshot_generation, state)))
+                except (LiveError, OSError):
+                    pass
+    monitor_thread = threading.Thread(target=monitor, name="cs2-editor-status", daemon=True)
+    monitor_thread.start()
+
     def tick():
-        nonlocal closing
+        nonlocal closing, latest_state, seen_export
         while True:
             try:
                 kind, value = events.get_nowait()
             except queue.Empty:
                 break
-            if kind == "status":
+            event_generation, value = value
+            if kind == "library":
+                populate_demo_library(value)
+                continue
+            if event_generation != generation:
+                continue
+            if kind == "state":
+                latest_state = value
+                if export_dialog and export_dialog.isVisible():
+                    export_dialog.refresh_project(value.get("project", {}))
+                ready = value.get("camera_valid") and value.get("view_hook_installed")
+                export_button.setEnabled(bool(ready) and not exporting)
+                requested = value.get("export_request_id", 0)
+                if requested > seen_export:
+                    seen_export = requested
+                    open_export()
+            elif kind == "status":
                 session_status.setText(value)
                 log_box.appendPlainText(value)
             else:
-                start_button.setEnabled(True)
+                start_button.setEnabled(not exporting)
                 stop_button.setEnabled(False)
-                choose.setEnabled(True)
+                export_button.setEnabled(False)
+                for control in selection_controls:
+                    control.setEnabled(not exporting)
+                refresh_library_button.setEnabled(not exporting and not library_loading)
                 message = "Session closed. Ready for another demo." if kind == "done" else f"Error: {value}"
                 session_status.setText(message)
                 log_box.appendPlainText(message)
-        if closing and (worker is None or not worker.is_alive()):
+        if closing and not exporting and (worker is None or not worker.is_alive()):
             app.quit()
 
     def close_event(event):
         nonlocal closing
-        if worker and worker.is_alive():
+        if exporting or (worker and worker.is_alive()):
             closing = True
+            if export_dialog and export_dialog.busy:
+                export_dialog.cancel_event.set()
             stop_session()
             event.ignore()
         else:
@@ -666,19 +923,28 @@ def graphical_launcher(args) -> int:
     timer.timeout.connect(tick)
     timer.start(100)
     choose.clicked.connect(browse)
+    demo_library.activated.connect(select_library_demo)
+    refresh_library_button.clicked.connect(refresh_demo_library)
+    game_edit.textEdited.connect(mark_game_directory_edited)
     start_button.clicked.connect(launch)
     stop_button.clicked.connect(stop_session)
+    export_button.clicked.connect(open_export)
     def signal_stop(signum, frame):
         nonlocal closing
         closing = True
         stop_event.set()
+        if export_dialog and export_dialog.busy:
+            export_dialog.cancel_event.set()
     old_handlers = {signum: signal.getsignal(signum) for signum in (signal.SIGINT, signal.SIGTERM)}
     for signum in old_handlers:
         signal.signal(signum, signal_stop)
     window.show()
+    QtCore.QTimer.singleShot(0, refresh_demo_library)
     try:
         return app.exec()
     finally:
+        monitor_stop.set()
+        monitor_thread.join(timeout=1)
         for signum, handler in old_handlers.items():
             signal.signal(signum, handler)
 

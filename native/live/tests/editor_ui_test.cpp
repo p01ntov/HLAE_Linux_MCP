@@ -124,10 +124,19 @@ class Fixture {
               for (auto field = args.begin(); field != args.end(); ++field)
                 key[field.key()] = field.value();
         } else if (method == "set_project") {
-          for (auto field = args.begin(); field != args.end(); ++field)
-            state["project"][field.key()] = field.value();
+          for (auto field = args.begin(); field != args.end(); ++field) {
+            if (field.key() == "render_range") {
+              if (!state["project"].contains("render_range"))
+                state["project"]["render_range"] = {{"mode", "composition"}, {"in", 0},
+                                                      {"out", state["project"]["duration"]}};
+              state["project"]["render_range"].update(field.value());
+            } else state["project"][field.key()] = field.value();
+          }
         } else if (method == "set_camera") {
-          state["camera"] = args;
+          state["camera"].update(args);
+        } else if (method == "set_scene") {
+          for (auto setting = args["settings"].begin(); setting != args["settings"].end(); ++setting)
+            state["scene_capabilities"][setting.key()]["value"] = setting.value();
         }
         state["revision"] = state["revision"].get<int>() + 1;
       });
@@ -142,7 +151,19 @@ class Fixture {
         --index;
       }
     }
-    throw std::runtime_error(std::string("Control not found: ") + window + "/" + label);
+    // BeginCombo in pinned ImGui registers ItemAdd without ItemInfo; locate
+    // its ordinary, unscoped ID using the same captured item registry.
+    if (index == 0) {
+      if (auto* target = ImGui::FindWindowByName(window)) {
+        const auto found = submitted.items.find(target->GetID(label));
+        if (found != submitted.items.end() && found->second.window == window)
+          return found->second;
+      }
+    }
+    std::string present;
+    for (const auto& entry : submitted.items)
+      if (entry.second.window == window && !entry.second.label.empty()) present += entry.second.label + ", ";
+    throw std::runtime_error(std::string("Control not found: ") + window + "/" + label + "; present: " + present);
   }
   void Mouse(ImVec2 position) {
     ImGui::GetIO().AddMousePosEvent(position.x, position.y);
@@ -235,6 +256,7 @@ void NumericGestures(float height) {
   // or open the shortcuts panel. Global host handlers use this same active ID.
   ImGui::GetIO().AddKeyEvent(ImGuiMod_Ctrl, true);
   f.Key(ImGuiKey_S);
+  f.Key(ImGuiKey_E);
   ImGui::GetIO().AddKeyEvent(ImGuiMod_Ctrl, false);
   f.Key(ImGuiKey_K);
   f.Key(ImGuiKey_Space);
@@ -277,6 +299,7 @@ void NumericGestures(float height) {
   f.Step();
   ImGui::GetIO().AddKeyEvent(ImGuiMod_Ctrl, true);
   f.Key(ImGuiKey_S);
+  f.Key(ImGuiKey_E);
   ImGui::GetIO().AddKeyEvent(ImGuiMod_Ctrl, false);
   f.Key(ImGuiKey_K);
   f.Key(ImGuiKey_Space);
@@ -371,15 +394,89 @@ void PoseAndProjectBounds() {
 
 void LiveCamera() {
   Fixture f;
+  f.state["project"]["keys"] = Json::array();
+  f.Step();
   f.Type("##fov", "88");
   Near(f.One("set_camera", "fov").get<double>(), 88, "Live camera replacement");
-  Require(f.commands[0].arguments.contains("position") &&
-              f.commands[0].arguments.contains("angles"),
-          "Live camera commit must retain the complete pose");
+  Require(f.commands[0].arguments.size() == 1,
+          "A lens change must preserve the latest roaming position and angles");
   f.BeginScrub("##fov");
   f.MoveScrub(1);
   f.EndScrub();
   Near(f.One("set_camera", "fov").get<double>(), 89, "Live camera middle step");
+}
+
+void RenderRegion(float height) {
+  Fixture f(height);
+  f.state["project"]["render_range"] = {{"mode", "composition"}, {"in", 1.0}, {"out", 6.0}};
+  f.Step();
+  // The selector stays available even when the inspector's settings are closed.
+  f.Click("##render_scope", 0, "##CS2CinematicTransport");
+  f.Step();
+  const char* popup = nullptr;
+  for (const auto& entry : f.submitted.items)
+    if (entry.second.label == "Render region") popup = entry.second.window.c_str();
+  Require(popup, "Render scope options missing");
+  const std::string popup_name = popup;
+  f.Click("Render region", 0, popup_name.c_str());
+  Require(f.One("set_project", "render_range")["mode"] == "region", "Scope selector did not enable region");
+  Near(f.state["project"]["render_range"]["in"].get<double>(), 1, "Scope retained In");
+  Near(f.state["project"]["render_range"]["out"].get<double>(), 6, "Scope retained Out");
+  f.commands.clear();
+  f.Click("Shot settings");
+  f.Step();
+  f.Type("##range_in", "2");
+  Near(f.One("set_project", "render_range")["in"].get<double>(), 2, "Typed In");
+  f.Type("##range_out", "5");
+  Near(f.One("set_project", "render_range")["out"].get<double>(), 5, "Typed Out");
+  f.commands.clear();
+  f.state["cursor"] = 3;
+  f.Step();
+  f.Key(ImGuiKey_I);
+  Near(f.One("set_project", "render_range")["in"].get<double>(), 3, "I sets cursor as In");
+  f.commands.clear();
+  f.state["cursor"] = 4;
+  f.Step();
+  f.Key(ImGuiKey_O);
+  Near(f.One("set_project", "render_range")["out"].get<double>(), 4, "O sets cursor as Out");
+  f.commands.clear();
+  f.Click("Reset region");
+  const auto& reset = f.One("set_project", "render_range");
+  Near(reset["in"].get<double>(), 0, "Reset In");
+  Near(reset["out"].get<double>(), 8, "Reset Out");
+
+  f.Click("Shot settings");
+  f.Step();
+  f.commands.clear();
+  const auto bounds = f.Find("##camera_timeline", 0, "##CS2CinematicTransport").bounds;
+  const float left = bounds.Min.x + 10 * f.scale;
+  const float width = bounds.GetWidth() - 20 * f.scale;
+  const float y = bounds.Min.y + 44 * f.scale;
+  // A click anywhere in the generous bracket hit area must not trim or snap.
+  f.ClickAt(ImVec2(left + 6 * f.scale, y));
+  Require(f.commands.empty(), "An off-center bracket click moved the range");
+  f.Mouse(ImVec2(left, y));
+  ImGui::GetIO().AddMouseButtonEvent(ImGuiMouseButton_Left, true);
+  f.Step();
+  f.Mouse(ImVec2(left + width * .25f, y));
+  f.Step();
+  Require(f.commands.empty(), "Region drag created history before release");
+  ImGui::GetIO().AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+  f.Step();
+  const auto& dragged = f.One("set_project", "render_range");
+  Near(dragged["in"].get<double>(), 2, "Dragged In bracket");
+  Require(dragged["mode"] == "region", "Dragging must activate saved region");
+  f.commands.clear();
+  f.Mouse(ImVec2(left + width, y));
+  ImGui::GetIO().AddMouseButtonEvent(ImGuiMouseButton_Left, true);
+  f.Step();
+  f.Mouse(ImVec2(left + width * .5f, y));
+  f.Step();
+  f.Key(ImGuiKey_Escape);
+  ImGui::GetIO().AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+  f.Step();
+  Require(f.commands.empty(), "Escape committed a range drag");
+  Near(f.state["project"]["render_range"]["out"].get<double>(), 8, "Escape retained Out");
 }
 
 void IndependentShortcutsPanel() {
@@ -412,6 +509,287 @@ void IndependentShortcutsPanel() {
   Require(f.editor.shortcuts_visible, "Inspector Hotkeys did not open separate panel");
   Require(f.commands.empty(), "Opening/moving shortcuts emitted native commands");
 }
+
+void ExactRangeBounds() {
+  Fixture f;
+  f.state["project"]["keys"] = Json::array();
+  f.state["project"]["duration"] = 3.14;
+  f.state["project"]["render_range"] = {{"mode", "region"}, {"in", 3.139}, {"out", 3.14}};
+  f.Step();
+  f.Click("Shot settings");
+  f.Step();
+  f.Type("##range_out", "99");
+  // The current boundary is already at the exact bound; no spurious history.
+  Require(f.commands.empty(), "Out clamp exceeded the exact imported duration");
+  f.commands.clear();
+  f.Click("Reset region");
+  const auto& range = f.One("set_project", "render_range");
+  Require(range["out"].get<double>() == 3.14, "Reset rounded Out beyond native duration");
+  f.commands.clear();
+  f.Type("##range_out", "3");
+  Require(f.One("set_project", "render_range")["out"].get<double>() == 3,
+          "Out did not accept a valid exact value after reset");
+}
+
+void SceneControls() {
+  Fixture f;
+  f.state["scene_capabilities"] = {
+      {"depth_of_field", {{"available", true}, {"type", "boolean"}, {"value", true},
+                            {"label", "Depth of field renderer"}, {"group", "Lens"}}},
+      {"exposure", {{"available", true}, {"type", "number"}, {"value", 1.0},
+                       {"label", "Exposure"}, {"group", "Lighting"}, {"minimum", 0}, {"maximum", 16}}},
+      {"fog_volume", {{"available", false}, {"type", "boolean"}, {"value", false},
+                         {"label", "Volume fog"}, {"group", "Environment"}, {"reason", "Not registered"}}}};
+  for (int i = 0; i < 3; ++i) f.Step();
+  f.Click("General");
+  for (int i = 0; i < 3; ++i) f.Step();
+  f.Click("Scene settings");
+  f.Step();
+  f.Click("Lens");
+  f.Step();
+  f.commands.clear();
+  f.Click("Depth of field renderer");
+  Require(f.One("set_scene", "settings")["depth_of_field"] == false, "DOF checkbox did not send typed change");
+  f.Click("Lighting");
+  f.Step();
+  f.Type("##scene_value", "99");
+  Near(f.One("set_scene", "settings")["exposure"].get<double>(), 16, "Runtime effect bound");
+  for (const auto& entry : f.submitted.items)
+    Require(entry.second.label != "Volume fog", "Unavailable engine effect leaked into the primary settings");
+  f.commands.clear();
+  f.Click("Reset scene settings");
+  Require(f.commands.size() == 1 && f.commands[0].method == "reset_scene", "Scene reset command missing");
+}
+
+void ExportAndHide() {
+  Fixture f;
+  f.Click("Export", 0, "##CS2CinematicTransport");
+  Require(f.commands.size() == 1 && f.commands[0].method == "request_export", "Export button did not request host window");
+  f.commands.clear();
+  ImGui::GetIO().AddKeyEvent(ImGuiMod_Ctrl, true);
+  f.Key(ImGuiKey_E);
+  ImGui::GetIO().AddKeyEvent(ImGuiMod_Ctrl, false);
+  f.Step();
+  Require(f.commands.size() == 1 && f.commands[0].method == "request_export", "Ctrl+E did not request export window");
+  f.commands.clear();
+  f.Click("Hide", 0, "##CS2CinematicTransport");
+  Require(!f.editor.visible, "Hide did not persist editor visibility request");
+  f.Step();
+  Require(ImGui::GetDrawData()->CmdListsCount == 0, "A hidden editor still emitted overlay pixels");
+}
+
+void PlayerCosmetics() {
+  Fixture f;
+  f.editor.cosmetics_catalog = {{"agents", Json::array({
+      {{"item_def", 1001}, {"display_name", "CT example"}, {"allowed_teams", {3}}, {"model", "agents/ct.vmdl"}},
+      {{"item_def", 1002}, {"display_name", "T example"}, {"allowed_teams", {2}}, {"model", "agents/t.vmdl"}},
+      {{"item_def", 5037}, {"display_name", "Map based CT"}, {"allowed_teams", {3}}, {"map_based", true}}})}};
+  f.state["cosmetics"] = {
+      {"players", Json::array({{{"steam_id", "76561198000000001"}, {"nickname", "cat :3"}, {"team", 3}, {"model_ready", true}}})},
+      {"stale", false}, {"capabilities", {{"agents", {{"available", true}}}}}};
+  for (int i = 0; i < 3; ++i) f.Step();
+  f.Click("General");
+  for (int i = 0; i < 3; ++i) f.Step();
+  f.Click("Models and skins");
+  for (int i = 0; i < 3; ++i) f.Step();
+  auto popup = [&](const char* wanted) {
+    for (const auto& entry : f.submitted.items)
+      if (entry.second.label == wanted) return entry.second.window;
+    throw std::runtime_error(std::string("Missing popup choice: ") + wanted);
+  };
+  f.Click("##cosmetic_agent");
+  f.Step();
+  for (const auto& entry : f.submitted.items)
+    Require(entry.second.label != "T example" && entry.second.label != "Map based CT",
+            "Agent list exposed wrong-team or hardcoded map default model");
+  const std::string choices = popup("CT example");
+  f.Click("CT example", 0, choices.c_str());
+  f.commands.clear();
+  f.Click("Apply to player");
+  Require(f.One("set_player_cosmetics", "steam_id") == "76561198000000001", "Agent addressed by nickname instead of stable SteamID");
+  Require(f.commands[0].arguments["agent_item_def"] == 1001, "Selected agent definition lost");
+  f.commands.clear();
+  f.Click("Map default");
+  Require(f.One("reset_player_cosmetics", "steam_id") == "76561198000000001", "Map default must restore original pawn, not choose generic agent");
+  f.commands.clear();
+  f.state["cosmetics"]["stale"] = true;
+  f.Step();
+  f.Click("Apply to player");
+  Require(f.commands.empty(), "Stale player snapshot allowed apply");
+  f.state["cosmetics"]["stale"] = false;
+  f.state["cosmetics"]["players"][0]["team"] = 2;
+  f.Step();
+  f.Click("##cosmetic_agent");
+  f.Step();
+  for (const auto& entry : f.submitted.items)
+    Require(entry.second.label != "CT example", "Team switch retained opposite-team agent option");
+  const std::string t_choices = popup("T example");
+  f.Click("T example", 0, t_choices.c_str());
+  f.state["cosmetics"]["players"] = Json::array();
+  f.Step();
+  f.commands.clear();
+  f.Click("Apply to player");
+  Require(f.commands.empty(), "Missing selected player allowed apply to another target");
+  f.Click("Import...");
+  Require(f.commands.empty(), "Unavailable per-player custom import emitted an engine command");
+}
+
+void PresentationSelectors() {
+  Fixture f;
+  f.state["presentation"] = {{"view", "player"}, {"hud", "gameplay"},
+      {"requested_view", "player"}, {"requested_hud", "gameplay"},
+      {"capabilities", Json::object()}};
+  for (const char* id : {"player", "free", "gameplay", "demo", "hidden"})
+    f.state["presentation"]["capabilities"][id] = {{"requestable", true}, {"available", false}};
+  f.Step();
+  f.Click("General");
+  for (int i = 0; i < 3; ++i) f.Step();
+  for (const auto& entry : f.submitted.items)
+    Require(entry.second.label != "Live camera", "Camera key fields leaked into General");
+  auto popup = [&](const char* label) {
+    for (const auto& entry : f.submitted.items)
+      if (entry.second.label == label) return entry.second.window;
+    throw std::runtime_error(std::string("Missing presentation option: ") + label);
+  };
+  f.Click("##presentation_view");
+  f.Step();
+  const std::string views = popup("Free camera");
+  f.Click("Free camera", 0, views.c_str());
+  Require(f.One("set_presentation", "view") == "free", "Free-camera selector did not request the real engine view");
+  Require(f.commands[0].arguments["hud"] == "demo", "Free camera retained incompatible gameplay HUD");
+  f.state["presentation"]["view"] = "free";
+  f.state["presentation"]["hud"] = "demo";
+  f.state["presentation"]["requested_view"] = "free";
+  f.state["presentation"]["requested_hud"] = "demo";
+  f.Step();
+  f.commands.clear();
+  f.Click("##presentation_hud");
+  f.Step();
+  for (const auto& entry : f.submitted.items)
+    Require(entry.second.label != "As playing", "Free camera exposed gameplay-only HUD option");
+  const std::string hud = popup("Hidden");
+  f.Click("Hidden", 0, hud.c_str());
+  Require(f.One("set_presentation", "hud") == "hidden", "Hidden HUD selection missing");
+  f.Click("Camera keys");
+  for (int i = 0; i < 3; ++i) f.Step();
+  f.SelectKey();
+  f.Type("##fov", "70");
+  Require(f.One("update_key", "fov") == 70, "FOV editing must update the selected animation key");
+}
+
+void WeaponPaintControls() {
+  Fixture f;
+  f.editor.cosmetics_catalog = {
+      {"agents", Json::array()},
+      {"weapons", Json::array({{{"item_def", 7}, {"kind", "weapon"}, {"display_name", "AK-47"}, {"paint_kits", {282}}},
+                               {{"item_def", 9}, {"kind", "weapon"}, {"display_name", "AWP"}, {"paint_kits", {344}}}})},
+      {"paint_kits", Json::array({{{"id", 282}, {"display_name", "Redline"}, {"wear_min", .1}, {"wear_max", .7}},
+                                  {{"id", 344}, {"display_name", "Dragon Lore"}, {"wear_min", 0}, {"wear_max", .7}}})}};
+  f.state["cosmetics"] = {{"players", Json::array({{{"steam_id", "76561198000000001"}, {"nickname", "Target"}, {"team", 2}}})},
+                            {"capabilities", Json::object()}, {"stale", false}};
+  f.state["weapon_cosmetics"] = {{"capability", {{"available", true}}}, {"stale", false},
+      {"weapons", Json::array({{{"steam_id", "76561198000000001"}, {"item_def", 7}, {"ready", true}, {"active", true}},
+                               {{"steam_id", "76561198000000002"}, {"item_def", 9}, {"ready", true}}})}};
+  f.Click("General");
+  for (int i = 0; i < 3; ++i) f.Step();
+  f.Click("Models and skins");
+  for (int i = 0; i < 3; ++i) f.Step();
+  auto popup = [&](const char* label) {
+    for (const auto& entry : f.submitted.items)
+      if (entry.second.label == label) return entry.second.window;
+    throw std::runtime_error(std::string("Missing weapon option: ") + label);
+  };
+  f.Click("##cosmetic_category");f.Step();
+  const auto categories = popup("Weapons");
+  f.Click("Weapons", 0, categories.c_str());
+  for (int i = 0; i < 3; ++i) f.Step();
+  f.Click("##cosmetic_weapon");f.Step();
+  for (const auto& entry : f.submitted.items)
+    Require(entry.second.label != "AWP", "Other player's weapon leaked into owned-item choices");
+  const auto weapons = popup("AK-47");f.Click("AK-47", 0, weapons.c_str());
+  f.Click("##cosmetic_finish");f.Step();
+  for (const auto& entry : f.submitted.items)
+    Require(entry.second.label != "Dragon Lore", "Finish for another item leaked into compatible choices");
+  const auto finishes = popup("Redline");f.Click("Redline", 0, finishes.c_str());
+  f.Type("##cosmetic_wear", "0.01");
+  f.Type("##cosmetic_seed", "1200");
+  f.commands.clear();f.Click("Apply finish");
+  Require(f.One("set_player_weapon_paint", "steam_id") == "76561198000000001", "Weapon finish lost selected player identity");
+  Require(f.commands[0].arguments["item_def"] == 7 && f.commands[0].arguments["paint_kit"] == 282,
+          "Finish application lost weapon/paint definition");
+  Near(f.commands[0].arguments["wear"].get<double>(), .1, "Per-finish wear minimum");
+  Require(f.commands[0].arguments["seed"] == 1000, "Pattern seed escaped supported bound");
+  f.commands.clear();f.Click("Restore finish");
+  Require(f.One("reset_player_weapon_paint", "item_def") == 7, "Finish restore must target this owned item");
+}
+void GloveControls() {
+  Fixture f;
+  f.editor.cosmetics_catalog = {
+      {"gloves", Json::array({{{"item_def", 5030}, {"display_name", "Sport Gloves"}, {"allowed_teams", {2, 3}}, {"paint_kits", {10018}}},
+                              {{"item_def", 5028}, {"display_name", "Default T gloves"}, {"allowed_teams", {2}}, {"paint_kits", Json::array()}},
+                              {{"item_def", 5035}, {"display_name", "CT only test"}, {"allowed_teams", {3}}, {"paint_kits", {10026}}}})},
+      {"paint_kits", Json::array({{{"id", 10018}, {"category", "glove"}, {"display_name", "Hedge Maze"}, {"wear_min", .06}, {"wear_max", .8}},
+                                  {{"id", 10026}, {"category", "glove"}, {"display_name", "Other glove finish"}},
+                                  {{"id", 282}, {"category", "weapon"}, {"display_name", "Redline"}}})}};
+  f.state["cosmetics"] = {{"players", Json::array({{{"steam_id", "76561198000000001"}, {"nickname", "Target"}, {"team", 2}}})},
+                          {"capabilities", Json::object()}, {"stale", false}};
+  f.state["glove_cosmetics"] = {{"capability", {{"available", true}}}, {"stale", false},
+      {"gloves", Json::array({{{"steam_id", "76561198000000001"}, {"item_def", 5028}, {"ready", true}, {"item_readable", true}},
+                              {{"steam_id", "76561198000000002"}, {"item_def", 5035}, {"requested_item_def", 5035}, {"paint_kit", 10026}, {"ready", true}, {"item_readable", true}}})}};
+  f.Click("General");
+  for (int i = 0; i < 3; ++i) f.Step();
+  f.Click("Models and skins");
+  for (int i = 0; i < 3; ++i) f.Step();
+  auto popup = [&](const char* label) {
+    for (const auto& entry : f.submitted.items)
+      if (entry.second.label == label) return entry.second.window;
+    throw std::runtime_error(std::string("Missing glove option: ") + label);
+  };
+  f.Click("##cosmetic_category");f.Step();
+  const auto categories = popup("Gloves");f.Click("Gloves", 0, categories.c_str());
+  for (int i = 0; i < 3; ++i) f.Step();
+  f.Click("##glove_item");f.Step();
+  for (const auto& entry : f.submitted.items) {
+    Require(entry.second.label != "CT only test", "Wrong-team glove leaked into current player's choices");
+    Require(entry.second.label != "Default T gloves", "Unpaintable default must restore actual original instead of substituting an item");
+  }
+  const auto items = popup("Sport Gloves");f.Click("Sport Gloves", 0, items.c_str());
+  f.Step();
+  f.Click("##glove_finish");f.Step();
+  for (const auto& entry : f.submitted.items)
+    Require(entry.second.label != "Other glove finish" && entry.second.label != "Redline", "Incompatible finish leaked into glove selector");
+  const auto finishes = popup("Hedge Maze");f.Click("Hedge Maze", 0, finishes.c_str());
+  f.Type("##glove_wear", "0.001");f.Type("##glove_seed", "1200");
+  const Json glove_rows = f.state["glove_cosmetics"]["gloves"];
+  f.state["glove_cosmetics"]["gloves"] = Json::array();f.Step();
+  f.commands.clear();f.Click("Apply gloves");
+  Require(f.commands.empty(), "Missing glove row permitted application");
+  f.state["glove_cosmetics"]["gloves"] = glove_rows;
+  for (int i = 0; i < 3; ++i) f.Step();
+  f.commands.clear();f.Click("Apply gloves");
+  Require(f.One("set_player_gloves", "steam_id") == "76561198000000001", "Glove selection lost selected player identity");
+  Require(f.commands[0].arguments["item_def"] == 5030 && f.commands[0].arguments["paint_kit"] == 10018,
+          "Glove selection lost compatible item/paint pair");
+  Near(f.commands[0].arguments["wear"].get<double>(), .06, "Glove wear minimum");
+  Require(f.commands[0].arguments["seed"] == 1000, "Glove seed escaped supported bound");
+  f.Click("##glove_wear");
+  ImGui::GetIO().AddInputCharactersUTF8("0.123");f.Step();
+  auto& echoed = f.state["glove_cosmetics"]["gloves"][0];
+  echoed.update({{"requested_item_def", 5030}, {"paint_kit", 10018}, {"wear", .6}, {"seed", 7}});
+  f.Step();f.Key(ImGuiKey_Enter);f.Step();
+  f.commands.clear();f.Click("Apply gloves");
+  Near(f.One("set_player_gloves", "wear").get<double>(), .123, "Asynchronous echo overwrote an active glove edit");
+  Require(f.commands[0].arguments["seed"] == 1000, "Asynchronous echo overwrote unsent glove draft");
+  f.state["glove_cosmetics"]["stale"] = true;f.Step();
+  f.commands.clear();f.Click("Apply gloves");
+  Require(f.commands.empty(), "Stale glove state permitted a new mutation");
+  f.Click("Restore gloves");
+  Require(f.One("reset_player_gloves", "steam_id") == "76561198000000001", "Glove restore lost original target");
+  f.state["glove_cosmetics"]["stale"] = false;
+  f.state["glove_cosmetics"]["gloves"][0]["restoration_unresolved"] = true;f.Step();
+  f.commands.clear();f.Click("Apply gloves");
+  Require(f.commands.empty(), "Unresolved glove baseline permitted another mutation");
+}
 }  // namespace
 
 int main() {
@@ -424,6 +802,23 @@ int main() {
     PoseAndProjectBounds();
     std::cout << "Live camera\n" << std::flush;
     LiveCamera();
+    std::cout << "Render region at 1080p / 720p\n" << std::flush;
+    RenderRegion(1080);
+    RenderRegion(720);
+    std::cout << "Exact/fine render region bounds\n" << std::flush;
+    ExactRangeBounds();
+    std::cout << "Scene effect capabilities\n" << std::flush;
+    SceneControls();
+    std::cout << "Export / hide controls\n" << std::flush;
+    ExportAndHide();
+    std::cout << "Player/team cosmetics gating\n" << std::flush;
+    PlayerCosmetics();
+    std::cout << "Presentation and separate camera-key controls\n" << std::flush;
+    PresentationSelectors();
+    std::cout << "Owned weapon and compatible finish controls\n" << std::flush;
+    WeaponPaintControls();
+    std::cout << "Selected-player gloves and compatible finishes\n" << std::flush;
+    GloveControls();
     std::cout << "Independent shortcuts panel\n" << std::flush;
     IndependentShortcutsPanel();
     std::cout << "PASS: numeric replacement, Enter/click-away, middle steps and bounds, "

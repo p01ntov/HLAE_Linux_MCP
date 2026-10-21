@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cs2-linux-mvp"
-version = "0.1.0"
+version = "0.1.1"
 description = "Native Linux CS2 demo POV rendering with the CS Demo Manager plugin"
 requires-python = ">=3.11"
 dependencies = ["demoparser2==0.42.0"]

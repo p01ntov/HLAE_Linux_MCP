@@ -115,6 +115,17 @@ class LauncherTests(unittest.TestCase):
 
 
 class LiveConfigurationTests(unittest.TestCase):
+    def test_catalog_failure_disables_cosmetics_without_blocking_camera_startup(self):
+        notices=[]
+        with patch("cs2_mvp.cosmetics_catalog.stage_catalog",side_effect=ValueError("unsupported installed schema")):
+            environment=live.staged_cosmetics_environment(Path("/game"),Path("/private/run"),notices.append)
+        self.assertNotIn("CS2_CAMERA_COSMETICS_CATALOG",environment)
+        self.assertIn("unsupported installed schema",environment["CS2_CAMERA_COSMETICS_CATALOG_ERROR"])
+        self.assertIn("unavailable",notices[-1])
+        with patch("cs2_mvp.cosmetics_catalog.stage_catalog",return_value=Path("/private/run/catalog.json")):
+            self.assertEqual(live.staged_cosmetics_environment(Path("/game"),Path("/private/run"),notices.append),
+                             {"CS2_CAMERA_COSMETICS_CATALOG":"/private/run/catalog.json"})
+
     def test_hotkey_defaults_and_user_bindings_are_preserved(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"XDG_CONFIG_HOME": directory}, clear=False):
             with patch.dict(os.environ, {}, clear=False):
@@ -198,6 +209,56 @@ class LiveConfigurationTests(unittest.TestCase):
                     live.run_session(demo, headless=True, notify=lambda message: None, windowed=True)
                 stop.assert_called_once()
                 self.assertIs(stop.call_args.args[0], process)
+
+    def test_definite_native_hook_failure_reports_guard_and_restores_owned_session(self):
+        from contextlib import nullcontext
+        from unittest.mock import Mock
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);runtime=root/"runtime";runtime.mkdir()
+            demo=root/"test.dem";demo.write_bytes(b"PBDEMS2\0")
+            endpoint=root/"control.sock";process=Mock(pid=12345)
+            process.poll.return_value=None
+            tracker=Mock();tracker.observe.return_value=[{"name":"cs2"}]
+            reason="Linux main-view hook requires the validated libclient GNU build-ID"
+            states=[{"camera_valid":False,"view_hook_installed":False,"error":reason},
+                    {"camera_valid":True,"view_hook_installed":False,"error":reason}]
+            queries=[];notices=[]
+            def request(method,params=None):
+                queries.append(method)
+                return states.pop(0) if method=="get_state" else {"keys":[]}
+            def launch(*args,**kwargs):
+                endpoint.touch()  # The native socket becomes visible after launch.
+                return process
+            with patch.object(live,"native_libraries",return_value=(Path("/plugin"),None)), \
+                 patch.object(live,"session_locks",return_value=nullcontext()), \
+                 patch.object(live,"runtime_directory",return_value=runtime), \
+                 patch.object(live,"control_socket_path",return_value=endpoint), \
+                 patch.object(live,"state_root",return_value=root/"state"), \
+                 patch.object(live,"hotkey_configuration",return_value=root/"hotkeys.json"), \
+                 patch.object(live,"staged_cosmetics_environment",return_value={}), \
+                 patch.object(live,"OwnedProcesses",return_value=tracker), \
+                 patch.dict(os.environ,{"DISPLAY":":99","XDG_DATA_HOME":str(root/"data")},clear=False), \
+                 patch("cs2_mvp.discovery.process_ids",side_effect=lambda name:[] if name=="cs2" else [1]), \
+                 patch("cs2_mvp.discovery.find_game",return_value=root), \
+                 patch("cs2_mvp.discovery.find_runtime",return_value=Path("/runtime")), \
+                 patch("cs2_mvp.discovery.sha256",return_value="fake"), \
+                 patch("cs2_mvp.csdm.temporary_plugin",return_value=nullcontext()), \
+                 patch("cs2_mvp.render.config_backup",return_value=nullcontext()), \
+                 patch.object(live.subprocess,"Popen",side_effect=launch), \
+                 patch.object(live.NativeClient,"request",side_effect=request), \
+                 patch.object(live,"_stop_owned") as stop:
+                with self.assertRaisesRegex(live.LiveError,"Native camera hook unavailable.*GNU build-ID"):
+                    live.run_session(demo,headless=True,notify=notices.append,windowed=True)
+            self.assertEqual(queries,["get_state","get_state","export_project"])
+            stop.assert_called_once()
+            self.assertIs(stop.call_args.args[0],process)
+            self.assertFalse(endpoint.exists())
+            self.assertFalse((runtime/"session.json").exists())
+            saved=json.loads(next((root/"state/runs").glob("*/session.json")).read_text())
+            self.assertEqual(saved["status"],"failed")
+            self.assertIn(reason,saved["error"])
+            self.assertNotIn("90 seconds",saved["error"])
+            self.assertTrue(any("restoring" in notice for notice in notices))
 
 
 class OwnedProcessTests(unittest.TestCase):

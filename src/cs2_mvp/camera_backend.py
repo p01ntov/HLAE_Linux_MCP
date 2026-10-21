@@ -19,10 +19,13 @@ def ensure_motion_plugin() -> Path:
         expected_dependencies = {"easywsclient": "afc1d8cfc584e0f1f4a77e8c0ce3e979d9fe7ce2",
                                  "hl2sdk": "dc8e7324b1e7f3cb115b1a861280a30ba5ce72a2",
                                  "json": "a03e65420ca9a14c97080b67036859aaac06700d"}
-        if (manifest.get("motion_abi") != 3 or manifest.get("upstream_commit") != CSDM_COMMIT
+        if (manifest.get("motion_abi") != 3 or manifest.get("environment_abi") != 1 or manifest.get("upstream_commit") != CSDM_COMMIT
                 or manifest.get("dependencies") != expected_dependencies):
             raise RuntimeError("Bundled capture plugin ABI or upstream pins do not match")
-        return verify_bundled_library("libcamera_capture.so", manifest.get("capture_sha256"), b"CS2_MVP_MOTION_ABI 3")
+        plugin = verify_bundled_library("libcamera_capture.so", manifest.get("capture_sha256"), b"CS2_MVP_MOTION_ABI 3")
+        if b"CS2_MVP_ENVIRONMENT_ABI 1" not in plugin.read_bytes():
+            raise RuntimeError("Bundled capture plugin failed environment ELF/ABI/hash verification")
+        return plugin
     helper = ROOT / "native/build_motion.py"
     # Keep the previous chat's donor checkout read-only. This capture build
     # can evolve independently, including endmovie's held-camera boundary.
@@ -39,6 +42,18 @@ def ensure_motion_plugin() -> Path:
     plugin = module.cached_plugin(cache)
     if plugin is None:
         raise RuntimeError(f"Native motion plugin verification failed; see {cache / 'build.log'}")
+    return plugin
+
+
+def verify_cosmetics_capture_support(plugin: Path | None = None, *, require_gloves: bool = False) -> Path:
+    plugin = plugin or ensure_motion_plugin()
+    binary = plugin.read_bytes()
+    if any(marker not in binary for marker in (b"CS2_MVP_MOTION_ABI 3", b"CS2_MVP_ENVIRONMENT_ABI 1",
+                                                b"CS2_MVP_COSMETICS_APPLIED", b"CS2_MVP_COSMETICS_RESTORED")):
+        raise RuntimeError("This capture plugin lacks the verified per-player cosmetic readback and restoration adapter")
+    if require_gloves and any(marker not in binary for marker in
+                             (b"CS2_MVP_GLOVES_POSE_ABI 1", b"CS2_MVP_GLOVES_RENDER_ABI 1")):
+        raise RuntimeError("This capture plugin lacks the verified glove pose and render publication adapter")
     return plugin
 
 
@@ -110,8 +125,9 @@ def validate_motion_log(log: str, expected_frames: int, expected_fov: float | di
     if abs(callbacks - expected) > 2 or abs(applied - expected) > 2 or overflow > 2:
         raise RuntimeError(f"Camera frame clock disagrees with capture: {callbacks} callbacks for {expected} poses")
     view = re.findall(r"CS2_MVP_VIEW_END writes=(\d+) fault=(\d+) tick=(\d+)", log)
+    builds = re.findall(r"CS2_MVP_VIEW_HOOK linux_build=([^\s]*)", log)
     if ("CS2_MVP_CAMERA_STAGE FRAME_START_LINUX_MAIN_VIEW" not in log
-            or "CS2_MVP_VIEW_HOOK linux_build=d5bacd2f5df4a3a68fa8bee8692337993548e14a" not in log
+            or len(builds) != 1 or builds[0] not in {"d5bacd2f5df4a3a68fa8bee8692337993548e14a", "f1e04e3616921a3bb25940eea9b4b6bfd7ccada5"}
             or len(view) != 1 or int(view[0][1]) != 0 or abs(int(view[0][0]) - expected_frames) > 2
             or int(view[0][2]) != tick):
         raise RuntimeError("Late Linux main-view writes were not confirmed for every captured camera pose")
@@ -128,7 +144,7 @@ def validate_motion_log(log: str, expected_frames: int, expected_fov: float | di
             raise RuntimeError("Animated FOV range was not confirmed by the Linux view hook")
     return {"abi": 3, "expected": expected, "applied": applied, "callbacks": callbacks,
             "overflow": overflow, "start_tick": int(begins[0][1]), "end_tick": tick,
-            "view_hook": True, "view_writes": int(view[0][0]), "fov_override": expected_fov,
+            "view_hook": True, "view_writes": int(view[0][0]), "fov_override": expected_fov, "client_build_id": builds[0],
             "backend": "Linux CViewSetup / FRAME_START"}
 
 

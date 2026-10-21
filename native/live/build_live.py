@@ -40,8 +40,15 @@ def digest(path: Path) -> str:
 def source_fingerprint() -> str:
     value = hashlib.sha256(COMMIT.encode())
     for path in (NATIVE / "csdm-motion.patch", NATIVE / "motion_track.h",
-                 NATIVE / "linux_view_patch.h", HERE / "csdm-live.patch",
-                 HERE / "live_controller.h", HERE / "compat_math.cpp", HERE / "live_exports.map", Path(__file__).resolve()):
+                 NATIVE / "linux_view_patch.h", NATIVE / "capture_environment.h", NATIVE / "capture_cosmetics.h", HERE / "csdm-live.patch",
+                 HERE / "live_controller.h", HERE / "scene_environment.h", HERE / "appearance_pack.h", HERE / "appearance_runtime.h",
+                 HERE / "team_palette.h",
+                 HERE / "cosmetics_catalog.h", HERE / "player_cosmetics.h", HERE / "cosmetics_runtime.h",
+                 HERE / "presentation.h", HERE / "presentation_runtime.h", HERE / "hud_presentation.h",
+                 HERE / "weapon_cosmetics.h",
+                 HERE / "glove_cosmetics.h", HERE / "glove_pose.h", HERE / "glove_render_phase.h",
+                 HERE / "demo_refresh.h",
+                 HERE / "compat_math.cpp", HERE / "live_exports.map", Path(__file__).resolve()):
         value.update(path.name.encode())
         value.update(path.read_bytes())
     return value.hexdigest()
@@ -148,7 +155,7 @@ def apply_patches(source: Path) -> None:
     for patch in (NATIVE / "csdm-motion.patch", HERE / "csdm-live.patch"):
         run(["git", "apply", "--check", str(patch)], source)
         run(["git", "apply", str(patch)], source)
-    for path in (NATIVE / "motion_track.h", NATIVE / "linux_view_patch.h", HERE / "live_controller.h", HERE / "compat_math.cpp", HERE / "live_exports.map"):
+    for path in (NATIVE / "motion_track.h", NATIVE / "linux_view_patch.h", NATIVE / "capture_environment.h", NATIVE / "capture_cosmetics.h", HERE / "live_controller.h", HERE / "scene_environment.h", HERE / "appearance_pack.h", HERE / "appearance_runtime.h", HERE / "team_palette.h", HERE / "cosmetics_catalog.h", HERE / "player_cosmetics.h", HERE / "cosmetics_runtime.h", HERE / "presentation.h", HERE / "presentation_runtime.h", HERE / "hud_presentation.h", HERE / "weapon_cosmetics.h", HERE / "glove_cosmetics.h", HERE / "glove_pose.h", HERE / "glove_render_phase.h", HERE / "demo_refresh.h", HERE / "compat_math.cpp", HERE / "live_exports.map"):
         shutil.copyfile(path, source / RELATIVE / path.name)
     marker.write_text(digest(main) + "\n")
 
@@ -165,6 +172,7 @@ def ensure_live_plugin(cache_dir: Path | str | None = None) -> Path:
         existing = cached_plugin(cache)
         if existing:
             return existing
+        fingerprint = source_fingerprint()
         for command in ("git", "g++", "make", "tar"):
             if shutil.which(command) is None:
                 raise RuntimeError(f"Native live build requires {command}")
@@ -173,6 +181,8 @@ def ensure_live_plugin(cache_dir: Path | str | None = None) -> Path:
         run(["make", "build", "CXXFLAGS=" + " ".join(BUILD_FLAGS),
              "SRC_FILES=main.cpp compat_math.cpp ./deps/easywsclient/easywsclient.cpp ./deps/hl2sdk/tier1/convar.cpp"], source / RELATIVE)
         built = source / "static/cs2/libserver.so"
+        if source_fingerprint() != fingerprint:
+            raise RuntimeError("Native live sources changed during compilation; rebuild the current sources")
         binary = built.read_bytes()
         if not binary.startswith(b"\x7fELF\x02\x01") or b"CS2_CAMERA_LIVE_ABI 1" not in binary:
             raise RuntimeError("Compiled library is not the expected ELF64 live plugin")
@@ -188,7 +198,7 @@ def ensure_live_plugin(cache_dir: Path | str | None = None) -> Path:
         os.replace(temporary, destination)
         manifest = {
             "live_abi": 1, "motion_abi": 3, "upstream_commit": COMMIT,
-            "dependencies": DEPENDENCIES, "source_fingerprint": source_fingerprint(),
+            "dependencies": DEPENDENCIES, "source_fingerprint": fingerprint,
             "sha256": digest(destination),
             "compiler": run(["g++", "--version"]).splitlines()[0],
         }

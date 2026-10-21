@@ -24,6 +24,7 @@
 #include "imgui.h"
 #include "imgui_impl_vulkan.h"
 #include "editor_ui.h"
+#include "cosmetics_catalog.h"
 #include "overlay_blur.h"
 
 namespace camera_overlay {
@@ -124,6 +125,24 @@ std::unordered_map<std::string,Hotkey> hotkeys={
     {"preview",{"F9",SDL_SCANCODE_F9,SDL_KMOD_NONE}}
 };
 std::string hotkeys_path;
+void LoadCosmeticsCatalog() {
+    static bool attempted=false;
+    if(attempted)return;
+    attempted=true;
+    if(const char* error=std::getenv("CS2_CAMERA_COSMETICS_CATALOG_ERROR"))
+        editor.cosmetics_catalog_error=error;
+    const char* path=std::getenv("CS2_CAMERA_COSMETICS_CATALOG");
+    if(!path || !*path)return;
+    try {
+        auto catalog=cs2_live::CosmeticsCatalog::ReadJson(path);
+        cs2_live::CosmeticsCatalog::Parse(catalog);
+        editor.cosmetics_catalog=std::move(catalog);
+        editor.cosmetics_catalog_error.clear();
+    } catch(const std::exception& error) {
+        editor.cosmetics_catalog_error=std::string("Game catalog unavailable: ")+error.what();
+        Log("%s",editor.cosmetics_catalog_error.c_str());
+    }
+}
 void LoadHotkeys() {
     const char* path=std::getenv("CS2_CAMERA_HOTKEYS");
     if(!path || !*path)return;
@@ -365,10 +384,10 @@ bool Draw(Swapchain& s,uint32_t image_index) {
         editor.Draw(state,[](const std::string& method,const nlohmann::json& params){
             if(command_fn) { const auto request=nlohmann::json{{"method",method},{"params",params}}.dump(); command_fn(request.c_str()); }
         });
-    } else {
-        auto* draw=ImGui::GetForegroundDrawList();
-        const auto hint=hotkeys.at("editor").name+"  CAMERA EDITOR";
-        draw->AddText(ImVec2(18,18),IM_COL32(225,222,209,175),hint.c_str());
+        if (!editor.visible) {
+            shown=false;
+            KeyboardMode(InputMode());
+        }
     }
     // The editor is an explicit input mode. Hide it for the game's roaming
     // controls; otherwise engine polling/warping must not fight widget input.
@@ -447,6 +466,7 @@ bool Setup(Swapchain& s,VkQueue queue,uint32_t family) {
         if(!Check(d.CreateFence(d.handle,&fence,nullptr,&f.fence),"fence") || !Check(d.CreateSemaphore(d.handle,&sem,nullptr,&f.complete),"semaphore"))return false;
     }
     ImGui::CreateContext();auto& io=ImGui::GetIO();io.IniFilename=nullptr;io.LogFilename=nullptr;
+    LoadCosmeticsCatalog();
     const char* custom_font=std::getenv("CS2_CAMERA_FONT");
     const char* installed_font=std::getenv("CS2_CAMERA_GAME_FONT");
     auto font_exists=[](const char* path){if(!path)return false;auto* file=std::fopen(path,"rb");if(!file)return false;std::fclose(file);return true;};

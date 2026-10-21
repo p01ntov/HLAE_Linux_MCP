@@ -30,6 +30,13 @@
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
+#include "scene_environment.h"
+#include "appearance_runtime.h"
+#include "demo_refresh.h"
+#include "player_cosmetics.h"
+#include "presentation.h"
+#include "weapon_cosmetics.h"
+#include "glove_cosmetics.h"
 
 namespace cs2_live {
 using Json = nlohmann::json;
@@ -75,13 +82,51 @@ struct Key {
     // keys. Ease-in/out belongs on an intentional segment, not every key.
     std::array<double,4> easing{0,0,1,1};
 };
+struct RenderRange {
+    std::string mode="composition";
+    double in=0,out=5;
+};
 struct Project {
     std::string name="Untitled cinematic";
     int startTick=0;
     double duration=5;
     std::string interpolation="smooth";
     std::vector<Key> keys;
+    std::optional<RenderRange> renderRange;
+    Json scene=Json::object();
+    Json cosmetics=Json::object();
+    Json presentation=Json::object();
 };
+inline RenderRange StoredRenderRange(const Project& project) {
+    return project.renderRange.value_or(RenderRange{"composition",0,project.duration});
+}
+inline RenderRange PlaybackRange(const Project& project) {
+    auto range=StoredRenderRange(project);
+    if(range.mode=="composition") {range.in=0;range.out=project.duration;}
+    return range;
+}
+inline void ValidateRenderRange(const RenderRange& range,double duration) {
+    if(range.mode!="composition" && range.mode!="region") throw std::invalid_argument("render range mode must be composition or region");
+    Finite(range.in,0,duration,"render range In");
+    Finite(range.out,0,duration,"render range Out");
+    if(range.in>=range.out) throw std::invalid_argument("render range requires In < Out");
+}
+inline RenderRange ReadRenderRange(const Json& value,double duration) {
+    if(!value.is_object()) throw std::invalid_argument("render_range must be an object");
+    RenderRange range{"composition",0,duration};
+    range.mode=value.value("mode",range.mode);
+    range.in=value.value("in",range.in);
+    range.out=value.value("out",range.out);
+    ValidateRenderRange(range,duration); return range;
+}
+inline void ResizeRenderRange(Project& project,double previousDuration) {
+    auto range=project.renderRange.value_or(RenderRange{"composition",0,previousDuration});
+    if(std::abs(range.out-previousDuration)<1e-9) range.out=project.duration;
+    const double span=std::min(.01,project.duration);
+    range.in=std::clamp(range.in,0.0,project.duration-span);
+    range.out=std::clamp(range.out,range.in+span,project.duration);
+    project.renderRange=range;
+}
 inline Json ToJson(const Key& key) {
     Json result=ToJson(key.pose);
     result["id"]=key.id; result["time"]=key.time; result["easing"]=key.easing;
@@ -90,8 +135,10 @@ inline Json ToJson(const Key& key) {
 inline Json ToJson(const Project& project) {
     Json keys=Json::array();
     for (const auto& key:project.keys) keys.push_back(ToJson(key));
+    const auto range=StoredRenderRange(project);
     return {{"name",project.name},{"start_tick",project.startTick},{"duration",project.duration},
-            {"interpolation",project.interpolation},{"keys",keys}};
+            {"interpolation",project.interpolation},{"keys",keys},
+            {"render_range",{{"mode",range.mode},{"in",range.in},{"out",range.out}}},{"scene",project.scene},{"cosmetics",project.cosmetics},{"presentation",project.presentation}};
 }
 inline Key ReadKey(const Json& value, Key key={}) {
     if (value.contains("id")) key.id=value.at("id").get<std::string>();
@@ -111,6 +158,11 @@ inline Key ReadKey(const Json& value, Key key={}) {
 inline void Normalize(Project& project) {
     if (project.name.size()>256) throw std::invalid_argument("project name is too long");
     Finite(project.duration,0.01,86400,"duration");
+    if(!project.renderRange) project.renderRange=RenderRange{"composition",0,project.duration};
+    ValidateRenderRange(*project.renderRange,project.duration);
+    ValidateSceneSettings(project.scene);
+    ValidateCosmetics(project.cosmetics);
+    ValidatePresentation(project.presentation);
     if (project.startTick<0 || project.startTick>2000000000) throw std::invalid_argument("invalid start_tick");
     if (project.interpolation!="linear" && project.interpolation!="smooth") throw std::invalid_argument("interpolation must be linear or smooth");
     if (project.keys.size()>4096) throw std::invalid_argument("project supports at most 4096 keys");
@@ -130,11 +182,21 @@ inline Project ReadProject(const Json& value) {
     project.startTick=value.value("start_tick",0);
     project.duration=value.value("duration",5.0);
     project.interpolation=value.value("interpolation",std::string("smooth"));
+    if(value.contains("render_range")) project.renderRange=ReadRenderRange(value.at("render_range"),project.duration);
+    if(value.contains("scene")) project.scene=value.at("scene");
+    if(value.contains("cosmetics")) project.cosmetics=value.at("cosmetics");
+    if(value.contains("presentation")) project.presentation=value.at("presentation");
     if (value.contains("keys")) {
         if (!value.at("keys").is_array()) throw std::invalid_argument("keys must be an array");
         for (const auto& key:value.at("keys")) project.keys.push_back(ReadKey(key));
     }
     Normalize(project); return project;
+}
+inline Json EffectiveSceneSettings(const Project& project) {
+    auto scene=project.scene;
+    if(project.presentation.contains("hud"))scene["hud_visible"]=project.presentation["hud"]!="hidden";
+    if(project.presentation.value("hud",std::string())=="gameplay")scene.update(GameplayHudScenePreset());
+    return scene;
 }
 inline double BezierCoordinate(double t,double a,double b) {
     const double v=1-t; return 3*v*v*t*a+3*v*t*t*b+t*t*t;
@@ -262,6 +324,37 @@ public:
         for (auto& request:remaining) Resolve(request,Error(request->input,"live session stopped"));
     }
     std::string StateJson() const { std::lock_guard<std::mutex> lock(stateMutex_); return stateJson_; }
+    void SetSceneBackend(SceneEnvironment::Read read,SceneEnvironment::Write write) {scene_.Bind(std::move(read),std::move(write));}
+    void SetSceneRegistry(Json registry) {sceneRegistry_=std::move(registry);}
+    void SetEntityInspector(std::function<Json(unsigned)> inspect) {entityInspector_=std::move(inspect);}
+    void SetCosmeticsBackend(PlayerCosmetics::Callbacks callbacks) {cosmetics_.Bind(std::move(callbacks));}
+    void SetPresentationBackend(Presentation::Callbacks callbacks) {presentation_.Bind(std::move(callbacks));}
+    void SetWeaponCosmeticsBackend(WeaponCosmetics::Callbacks callbacks) {weaponCosmetics_.Bind(std::move(callbacks));}
+    void RestoreWeaponCosmetics() {weaponCosmetics_.Refresh(false);}
+    void SetGloveCosmeticsBackend(GloveCosmetics::Callbacks callbacks) {gloveCosmetics_.Bind(std::move(callbacks));}
+    void RestoreGloveCosmetics() {gloveCosmetics_.Refresh(false);}
+    void RestorePresentation() {presentation_.Suspend();}
+    void RestoreCosmetics() {cosmetics_.Refresh(false);}
+    void RestoreScene() {scene_.Apply(Json::object());}
+    void SetAppearanceBackend(AppearancePack::Callbacks callbacks) {appearance_.Bind(std::move(callbacks));}
+    void RestoreAppearance() {appearance_.Reset(false);}
+    bool CanRefreshAppearance() const {
+        const char* path=std::getenv("CS2_CAMERA_DEMO_PATH");if(!path)return false;
+        try{DemoRefresh::CheckPath(path);return true;}catch(...){return false;}
+    }
+    bool RequestAppearanceRefresh() {
+        if(demoRefresh_.Active() || !currentExecute_ || !CanRefreshAppearance())return false;
+        if(!appearanceTransition_) {
+            appearanceSavedCamera_=camera_;appearanceSavedCursor_=cursor_;
+            appearanceSavedTick_=tick_;appearanceSavedPaused_=paused_;
+        }
+        mode_="hold";playing_=false;appearanceTransition_=true;
+        try {
+            const auto result=demoRefresh_.Start(std::getenv("CS2_CAMERA_DEMO_PATH"),appearanceSavedTick_,appearanceSavedPaused_,currentExecute_);
+            if(result==DemoRefresh::Result::Failed){commandError_=demoRefresh_.Error();appearanceTransition_=false;return false;}
+            return true;
+        }catch(const std::exception& error){commandError_=error.what();appearanceTransition_=false;return false;}
+    }
     void EnqueueText(const char* text) {
         if (!enabled_ || !text) return;
         if (strnlen(text,MaxLine+1)>MaxLine) return;
@@ -270,15 +363,60 @@ public:
     // Called once per FRAME_START, before all playback-related early returns.
     void Frame(bool demo,int tick,bool paused,double tickRate,bool hookInstalled,const std::string& hookError,const Execute& execute) {
         if (!enabled_) return;
-        demo_=demo; tick_=tick; paused_=paused; tickRate_=tickRate>0?tickRate:64;
+        if(demo!=demo_ || (demo && (tick<tick_ || tick-tick_>int(std::max(128.0,tickRate*2))))) {
+            ++entityEpoch_;if(entityProbe_.is_object())entityProbe_["stale"]=true;
+        }
+        demo_=demo; tick_=tick; paused_=paused;if(pauseIntent_ && *pauseIntent_==paused_)pauseIntent_.reset(); tickRate_=tickRate>0?tickRate:64;
         hookInstalled_=hookInstalled;
+        currentExecute_=execute;
+        if(demoRefresh_.Active()) {
+            bool viewReady=false;
+            {std::lock_guard<std::mutex> lock(viewMutex_);
+             if(!demo_ && std::strcmp(demoRefresh_.Phase(),"waiting_unload")==0)observedValid_=false;
+             viewReady=observedValid_;}
+            const auto result=demoRefresh_.Advance(demo_,tick_,viewReady,execute);
+            if(result==DemoRefresh::Result::Complete) {
+                camera_=appearanceSavedCamera_;cursor_=appearanceSavedCursor_;
+                mode_="hold";playing_=false;cameraValid_=true;waitingForSeek_=false;
+                appearanceTransition_=false;commandError_.clear();
+            } else if(result==DemoRefresh::Result::Failed){commandError_="appearance refresh: "+demoRefresh_.Error();appearanceTransition_=false;}
+        }
+        scene_.Refresh();
+        presentation_.SetSceneCapabilities(scene_.Capabilities());
         const std::string priorityError=!startupError_.empty()?startupError_:hookError;
         error_=priorityError.empty()?commandError_:priorityError;
         { std::lock_guard<std::mutex> lock(viewMutex_); if (observedValid_) { cameraValid_=true; if (mode_=="free") camera_=observed_; } }
-        if (!demo_) {
+        if (!demo_ && !appearanceTransition_) {
+            try {scene_.Apply(Json::object());}catch(const std::exception& exception){commandError_=exception.what();}
+            try {appearance_.Reset(false);}catch(const std::exception& exception){commandError_=exception.what();}
             playing_=false; mode_="free"; cameraValid_=false;
             std::lock_guard<std::mutex> lock(viewMutex_); observedValid_=false;
         }
+        if(demo_) {
+            try {scene_.Apply(EffectiveSceneSettings(project_));}catch(const std::exception& exception){commandError_=exception.what();}
+        }
+        {const auto capabilities=scene_.Capabilities();bool visible=true;
+         presentation_.SetSceneCapabilities(capabilities);
+         if(capabilities.contains("hud_visible") && capabilities["hud_visible"].contains("value") && capabilities["hud_visible"]["value"].is_boolean())visible=capabilities["hud_visible"]["value"].get<bool>();
+         presentation_.Frame(demo_,visible);}
+        try {
+            cosmetics_.Refresh(demo_);
+            const auto generation=cosmetics_.State().value("runtime_generation",std::uint64_t(0));
+            if(generation!=cosmeticsGeneration_){cosmeticsGeneration_=generation;++entityEpoch_;if(entityProbe_.is_object())entityProbe_["stale"]=true;}
+            if(demo_ && cosmetics_.State().value("needs_demo_refresh",false) && !appearanceTransition_ && !demoRefresh_.Active() && cosmeticsRefreshRevision_!=revision_) {
+                cosmeticsRefreshRevision_=revision_;cosmetics_.Refresh(false);
+                if(!RequestAppearanceRefresh())commandError_="player changed team with an owned model; canonical demo refresh failed or is unavailable";
+            }
+        }catch(const std::exception& exception){commandError_=exception.what();}
+        try{weaponCosmetics_.Refresh(demo_);}catch(const std::exception& exception){commandError_=exception.what();}
+        try{
+            gloveCosmetics_.Context(demo_,tick_,paused_);gloveCosmetics_.Refresh(demo_);
+            if(demo_ && (gloveCosmetics_.State().value("restoration_unresolved",false) || gloveCosmetics_.State().value("needs_demo_refresh",false)) && !appearanceTransition_ && !demoRefresh_.Active() && cosmeticsRefreshRevision_!=revision_) {
+                cosmeticsRefreshRevision_=revision_;gloveCosmetics_.Refresh(false);weaponCosmetics_.Refresh(false);cosmetics_.Refresh(false);
+                if(!RequestAppearanceRefresh())commandError_="glove restoration is unresolved; canonical demo refresh failed or is unavailable";
+            }
+        }catch(const std::exception& exception){commandError_=exception.what();}
+        error_=priorityError.empty()?commandError_:priorityError;
         // Capturing additional keys while freely navigating should use the
         // visible demo time. A later capture can extend the initial duration.
         if (demo_ && mode_=="free" && !paused_ && !project_.keys.empty())
@@ -287,7 +425,7 @@ public:
         { std::lock_guard<std::mutex> lock(queueMutex_);
           for (int i=0;i<64 && !queue_.empty();++i) { ready.push_back(queue_.front()); queue_.pop_front(); } }
         for (const auto& request:ready) {
-            if (request->cancelled) continue;
+            unsigned queued=0;if(!request->phase.compare_exchange_strong(queued,1))continue;
             try {
                 const bool wasSyncPlaying=playing_ && syncDemo_;
                 Json result=Command(request->input,execute);
@@ -313,12 +451,13 @@ public:
                 waitingForSeek_=false; playing_=false; mode_="hold"; commandError_="demo seek did not reach the preview start";
                 error_=priorityError.empty()?commandError_:priorityError;
             }
-            if (syncDemo_ && !waitingForSeek_ && playing_) cursor_=std::clamp((tick_-project_.startTick)/tickRate_,0.0,project_.duration);
-            else if (!syncDemo_) cursor_=std::clamp(previewStartCursor_+std::chrono::duration<double>(Clock::now()-previewStart_).count(),0.0,project_.duration);
+            const auto range=PlaybackRange(project_);
+            if (syncDemo_ && !waitingForSeek_ && playing_) cursor_=std::clamp((tick_-project_.startTick)/tickRate_,range.in,range.out);
+            else if (!syncDemo_) cursor_=std::clamp(previewStartCursor_+std::chrono::duration<double>(Clock::now()-previewStart_).count(),range.in,range.out);
             camera_=Sample(project_,cursor_);
-            if (cursor_>=project_.duration) { playing_=false; mode_="hold"; if (syncDemo_) execute("demo_pause"); }
+            if (playing_ && cursor_>=range.out) { playing_=false; mode_="hold"; if (syncDemo_) execute("demo_pause"); }
         }
-        { std::lock_guard<std::mutex> lock(viewMutex_); output_=camera_; outputEnabled_=demo_ && mode_!="free" && cameraValid_; }
+        { std::lock_guard<std::mutex> lock(viewMutex_); output_=camera_; outputEnabled_=(demo_ || appearanceTransition_) && mode_!="free" && cameraValid_; }
         Publish();
     }
     // No engine calls here: view construction may occur on another thread.
@@ -336,11 +475,11 @@ public:
     }
 
 private:
-    struct Request { Json input; std::promise<Json> reply; std::atomic<bool> cancelled{false}; };
+    struct Request { Json input; std::promise<Json> reply; std::atomic<unsigned> phase{0}; }; // queued/running/completed/cancelled
     static Json Error(const Json& input,const std::string& message) {
         return {{"id",input.is_object()?input.value("id",Json(nullptr)):Json(nullptr)},{"error",{{"message",message}}}};
     }
-    static void Resolve(const std::shared_ptr<Request>& request,Json value) { try {request->reply.set_value(std::move(value));} catch (const std::future_error&) {} }
+    static void Resolve(const std::shared_ptr<Request>& request,Json value) { try {request->reply.set_value(std::move(value));request->phase=2;} catch (const std::future_error&) {} }
     std::shared_ptr<Request> Queue(Json input) {
         if (!input.is_object() || !input.contains("method") || !input.at("method").is_string()) throw std::invalid_argument("request requires method");
         auto request=std::make_shared<Request>(); request->input=std::move(input);
@@ -350,11 +489,25 @@ private:
     }
     Json Snapshot() const { std::lock_guard<std::mutex> lock(stateMutex_); return Json::parse(stateJson_); }
     void Publish() {
+        auto cosmetics=cosmetics_.State();cosmetics["epoch"]=entityEpoch_;cosmetics["sample_tick"]=tick_;cosmetics["stale"]=!demo_ || cosmetics.value("stale",false);
+        cosmetics["capabilities"]["weapons"]=weaponCosmetics_.Capabilities();
+        cosmetics["capabilities"]["gloves"]=gloveCosmetics_.Capabilities();
+        auto weapons=weaponCosmetics_.State();weapons["epoch"]=entityEpoch_;weapons["sample_tick"]=tick_;weapons["stale"]=!demo_ || weapons.value("stale",false);
+        auto gloves=gloveCosmetics_.State();gloves["epoch"]=entityEpoch_;gloves["sample_tick"]=tick_;gloves["stale"]=!demo_ || gloves.value("stale",false);
         Json state={{"abi",Abi},{"connected",enabled_},{"demo",demo_},{"tick",tick_},{"tick_rate",tickRate_},
                     {"paused",paused_},{"mode",mode_},{"camera",ToJson(camera_)},{"camera_valid",cameraValid_},
                     {"project",ToJson(project_)},{"cursor",cursor_},{"preview_playing",playing_},{"sync_demo",syncDemo_},
                     {"revision",revision_},{"view_hook_installed",hookInstalled_},{"view_writes",viewWrites_.load()},
-                    {"undo_available",!undo_.empty()},{"redo_available",!redo_.empty()}};
+                    {"undo_available",!undo_.empty()},{"redo_available",!redo_.empty()},
+                    {"scene_capabilities",scene_.Capabilities()},{"scene_registry",sceneRegistry_},
+                    {"appearance",appearance_.State()},{"appearance_capabilities",appearance_.Capabilities()},
+                    {"appearance_refresh",demoRefresh_.State()},
+                    {"entity_inspection_available",bool(entityInspector_)},{"entity_probe",entityProbe_},
+                    {"cosmetics",std::move(cosmetics)},
+                    {"presentation",presentation_.State()},
+                    {"weapon_cosmetics",std::move(weapons)},
+                    {"glove_cosmetics",std::move(gloves)},
+                    {"export_request_id",exportRequestId_}};
         if (!error_.empty()) state["error"]=error_;
         std::lock_guard<std::mutex> lock(stateMutex_); stateJson_=state.dump();
     }
@@ -363,8 +516,22 @@ private:
         if (!hookInstalled_) throw std::runtime_error("validated camera hook unavailable: "+error_);
     }
     void NeedCamera() const { if (!cameraValid_) throw std::runtime_error("waiting for the first valid game camera sample"); }
+    void PrepareCosmeticsSeek() {
+        gloveCosmetics_.Refresh(false);weaponCosmetics_.Refresh(false);cosmetics_.Refresh(false);
+        ++entityEpoch_;if(entityProbe_.is_object())entityProbe_["stale"]=true;
+    }
     void Commit(Project value) {
-        Normalize(value); undo_.push_back(project_); if (undo_.size()>64) undo_.pop_front();
+        Normalize(value);
+        if(!value.scene.empty() || !value.cosmetics.empty() || !value.presentation.empty())NeedDemo();
+        cosmetics_.ValidateRequest(value.cosmetics);
+        weaponCosmetics_.ValidateRequest(value.cosmetics.value("weapon_paints",Json::array()));
+        gloveCosmetics_.ValidateRequest(value.cosmetics.value("gloves",Json::array()));
+        presentation_.ValidateRequest(value.presentation);
+        scene_.Apply(EffectiveSceneSettings(value));
+        presentation_.SetSceneCapabilities(scene_.Capabilities());
+        try{presentation_.Apply(value.presentation);cosmetics_.Apply(value.cosmetics);weaponCosmetics_.Apply(value.cosmetics.value("weapon_paints",Json::array()));gloveCosmetics_.Apply(value.cosmetics.value("gloves",Json::array()));}
+        catch(...){scene_.Apply(EffectiveSceneSettings(project_));presentation_.SetSceneCapabilities(scene_.Capabilities());presentation_.Apply(project_.presentation);cosmetics_.Apply(project_.cosmetics);weaponCosmetics_.Apply(project_.cosmetics.value("weapon_paints",Json::array()));gloveCosmetics_.Apply(project_.cosmetics.value("gloves",Json::array()));throw;}
+        undo_.push_back(project_); if (undo_.size()>64) undo_.pop_front();
         project_=std::move(value); redo_.clear(); playing_=false; if(mode_=="preview") mode_="hold";
         cursor_=std::min(cursor_,project_.duration); ++revision_;
     }
@@ -430,9 +597,99 @@ private:
         if (method=="ping") return {{"pong",true},{"abi",Abi}};
         if (method=="get_state") return nullptr;
         if (method=="export_project") return ToJson(project_);
+        if (method=="request_export") {
+            if(!params.empty())throw std::invalid_argument("request_export takes no arguments");
+            ++exportRequestId_;return nullptr;
+        }
         if (method=="save_project") return SaveProject();
+        if(demoRefresh_.Active())throw std::runtime_error("wait for the appearance demo reload to finish before editing");
         if (method=="load_project") { LoadProject(); return nullptr; }
-        if (method=="set_camera") {
+        if(method=="inspect_entities") {
+            NeedDemo();
+            for(auto entry=params.begin();entry!=params.end();++entry)
+                if(entry.key()!="limit")throw std::invalid_argument("inspect_entities only accepts limit");
+            const auto value=params.value("limit",Json(64));
+            if(!value.is_number_integer() || value.get<long long>()<1 || value.get<long long>()>128)
+                throw std::invalid_argument("inspect_entities limit must be an integer in 1..128");
+            if(!entityInspector_)throw std::runtime_error("client entity inspection backend is not bound");
+            entityProbe_=entityInspector_(value.get<unsigned>());entityProbe_["epoch"]=entityEpoch_;entityProbe_["sample_tick"]=tick_;entityProbe_["snapshot_id"]=++entitySnapshot_;entityProbe_["stale"]=false;return entityProbe_;
+        }
+        if(method=="set_player_cosmetics" || method=="reset_player_cosmetics" || method=="set_team_palette" || method=="reset_team_palette") {
+            NeedDemo();if(appearance_.State().value("active",false))throw std::runtime_error("reset the global appearance pack before selecting per-player cosmetics");
+            Project next=project_;
+            if(method=="set_player_cosmetics") {
+                CosmeticsKeys(params,{"steam_id","nickname","agent_item_def"},"set_player_cosmetics");
+                const Json request={{"players",Json::array({params})}};cosmetics_.ValidateRequest(request,true);
+                auto players=next.cosmetics.value("players",Json::array());
+                players.erase(std::remove_if(players.begin(),players.end(),[&](const Json& item){return item["steam_id"]==params.at("steam_id");}),players.end());
+                if(!cosmetics_.IsMapDefault(params.at("agent_item_def").get<unsigned>()))players.push_back(params);
+                if(players.empty())next.cosmetics.erase("players");else next.cosmetics["players"]=std::move(players);
+            }else if(method=="reset_player_cosmetics") {
+                CosmeticsKeys(params,{"steam_id"},"reset_player_cosmetics");
+                if(params.contains("steam_id"))ValidateSteamId(params["steam_id"]);
+                if(next.cosmetics.contains("players")) {
+                    auto& players=next.cosmetics["players"];
+                    if(params.empty())next.cosmetics.erase("players");
+                    else {players.erase(std::remove_if(players.begin(),players.end(),[&](const Json& item){return item["steam_id"]==params["steam_id"]; }),players.end());if(players.empty())next.cosmetics.erase("players");}
+                }
+            }else if(method=="set_team_palette") {
+                CosmeticsKeys(params,{"enabled","t","ct"},"set_team_palette");
+                auto palette=next.cosmetics.value("team_palette",Json{{"enabled",false},{"t",{255,64,64}},{"ct",{64,128,255}}});
+                palette.update(params);next.cosmetics["team_palette"]=std::move(palette);
+            }else {if(!params.empty())throw std::invalid_argument("reset_team_palette takes no arguments");next.cosmetics.erase("team_palette");}
+            Commit(std::move(next));return nullptr;
+        }
+        if(method=="set_presentation") {
+            NeedDemo();Project next=project_;next.presentation=presentation_.Merge(params);Commit(std::move(next));
+            if(params.contains("view")){playing_=false;mode_="free";}
+            return nullptr;
+        }
+        if(method=="set_player_weapon_paint" || method=="reset_player_weapon_paint") {
+            NeedDemo();if(appearance_.State().value("active",false))throw std::runtime_error("reset the global appearance pack before selecting per-player weapon paint");
+            Project next=project_;auto paints=next.cosmetics.value("weapon_paints",Json::array());
+            if(method=="set_player_weapon_paint") {
+                weaponCosmetics_.ValidateRequest(Json::array({params}),true);
+                paints.erase(std::remove_if(paints.begin(),paints.end(),[&](const Json& item){return item["steam_id"]==params.at("steam_id") && item["item_def"]==params.at("item_def");}),paints.end());paints.push_back(params);
+            }else {
+                CosmeticsKeys(params,{"steam_id","item_def"},"reset_player_weapon_paint");ValidateSteamId(params.at("steam_id"));
+                if(params.contains("item_def") && (!params["item_def"].is_number_integer() || params["item_def"].get<long long>()<1 || params["item_def"].get<long long>()>65535))throw std::invalid_argument("item_def must be an integer in 1..65535");
+                paints.erase(std::remove_if(paints.begin(),paints.end(),[&](const Json& item){return item["steam_id"]==params["steam_id"] && (!params.contains("item_def") || item["item_def"]==params["item_def"]);}),paints.end());
+            }
+            if(paints.empty())next.cosmetics.erase("weapon_paints");else next.cosmetics["weapon_paints"]=std::move(paints);
+            Commit(std::move(next));return nullptr;
+        }
+        if(method=="set_player_gloves" || method=="reset_player_gloves") {
+            NeedDemo();if(appearance_.State().value("active",false))throw std::runtime_error("reset the global appearance pack before selecting per-player gloves");
+            Project next=project_;auto gloves=next.cosmetics.value("gloves",Json::array());
+            if(method=="set_player_gloves") {
+                gloveCosmetics_.ValidateRequest(Json::array({params}),true);
+                gloves.erase(std::remove_if(gloves.begin(),gloves.end(),[&](const Json& item){return item["steam_id"]==params.at("steam_id");}),gloves.end());gloves.push_back(params);
+            }else {
+                CosmeticsKeys(params,{"steam_id"},"reset_player_gloves");
+                if(params.contains("steam_id"))ValidateSteamId(params["steam_id"]);
+                gloves.erase(std::remove_if(gloves.begin(),gloves.end(),[&](const Json& item){return params.empty() || item["steam_id"]==params["steam_id"]; }),gloves.end());
+            }
+            if(gloves.empty())next.cosmetics.erase("gloves");else next.cosmetics["gloves"]=std::move(gloves);
+            Commit(std::move(next));return nullptr;
+        }
+        if(method=="probe_appearance_pack") {
+            NeedDemo();if(!paused_)throw std::runtime_error("pause the demo before probing a temporary appearance mount");
+            return appearance_.Probe(params);
+        }
+        if(method=="apply_appearance_pack" || method=="reset_appearance") {
+            NeedDemo();NeedCamera();
+            if(method=="apply_appearance_pack")appearance_.Apply(params);else appearance_.Reset();
+            playing_=false;if(mode_=="preview")mode_="hold";++revision_;
+        } else if(method=="set_scene") {
+            NeedDemo();
+            const auto& settings=params.at("settings");ValidateSceneSettings(settings);
+            Project next=project_;
+            if(settings.contains("shading_mode") && !settings.contains("fullbright"))next.scene.erase("fullbright");
+            if(settings.contains("fullbright") && !settings.contains("shading_mode"))next.scene.erase("shading_mode");
+            next.scene.update(settings);Commit(std::move(next));
+        } else if(method=="reset_scene") {
+            NeedDemo();Project next=project_;next.scene=Json::object();Commit(std::move(next));
+        } else if (method=="set_camera") {
             NeedDemo(); NeedCamera(); camera_=ReadPose(params.contains("camera")?params.at("camera"):params,camera_);
             mode_="hold"; playing_=false; execute("spec_autodirector 0"); ++revision_;
         } else if (method=="release_camera") {
@@ -442,7 +699,9 @@ private:
             Key key; key.id=NewKeyId(); key.time=params.value("time",cursor_); key.pose=camera_;
             if(next.keys.empty()) next.startTick=std::max(0,tick_-int(std::llround(key.time*tickRate_)));
             Json value=params; value["id"]=key.id;
-            key=ReadKey(value,key); next.duration=std::max(next.duration,key.time); next.keys.push_back(key); Commit(next);
+            key=ReadKey(value,key); next.duration=std::max(next.duration,key.time);
+            if(next.duration!=project_.duration) ResizeRenderRange(next,project_.duration);
+            next.keys.push_back(key); Commit(next);
             return ToJson(key);
         } else if (method=="update_key" || method=="remove_key") {
             Project next=project_; const std::string id=params.at("id").get<std::string>();
@@ -452,12 +711,27 @@ private:
             Commit(next);
         } else if (method=="set_project" || method=="import_project") {
             Json value=params.contains("project")?params.at("project"):params;
-            if (method=="set_project") { Json merged=ToJson(project_); merged.update(value); value=merged; }
+            if (method=="set_project") {
+                if(!value.is_object()) throw std::invalid_argument("project must be an object");
+                Project base=project_;
+                if(value.contains("duration")) {
+                    base.duration=value.at("duration").get<double>();
+                    Finite(base.duration,.01,86400,"duration");
+                    if(base.duration!=project_.duration) ResizeRenderRange(base,project_.duration);
+                }
+                Json merged=ToJson(base);
+                if(value.contains("render_range")) {
+                    if(!value.at("render_range").is_object()) throw std::invalid_argument("render_range must be an object");
+                    Json range=merged.at("render_range"); range.update(value.at("render_range"));
+                    merged.update(value); merged["render_range"]=std::move(range);
+                } else merged.update(value);
+                value=std::move(merged);
+            }
             Commit(ReadProject(value));
         } else if (method=="scrub") {
             NeedDemo(); NeedCamera(); double time=params.at("time").get<double>(); Finite(time,0,project_.duration,"cursor");
             Pose next=Sample(project_,time); camera_=next; cursor_=time; playing_=false; mode_="hold";
-            if (params.value("seek_demo",false)) { execute("demo_pause"); execute("demo_gototick "+std::to_string(project_.startTick+int(std::llround(time*tickRate_)))); }
+            if (params.value("seek_demo",false)) { PrepareCosmeticsSeek();execute("demo_pause"); pauseIntent_=true;execute("demo_gototick "+std::to_string(project_.startTick+int(std::llround(time*tickRate_)))+" pause"); }
             ++revision_;
         } else if (method=="preview") {
             NeedDemo(); NeedCamera(); bool playing=params.value("playing",true);
@@ -466,11 +740,12 @@ private:
             if (playing && project_.keys.empty()) throw std::invalid_argument("add a camera key before preview");
             syncDemo_=sync;
             if (playing) {
-                if (cursor_>=project_.duration) cursor_=0;
+                const auto range=PlaybackRange(project_);
+                if(cursor_<range.in || cursor_>=range.out) cursor_=range.in;
                 previewStartCursor_=cursor_; previewStart_=Clock::now(); playing_=true; mode_="preview";
                 camera_=Sample(project_,cursor_); execute("spec_autodirector 0");
                 waitingForSeek_=syncDemo_;
-                if (syncDemo_) { previewSeekTick_=project_.startTick+int(std::llround(cursor_*tickRate_)); execute("demo_gototick "+std::to_string(previewSeekTick_)); execute("demo_resume"); }
+                if (syncDemo_) { pauseIntent_=false;PrepareCosmeticsSeek();previewSeekTick_=project_.startTick+int(std::llround(cursor_*tickRate_)); execute("demo_gototick "+std::to_string(previewSeekTick_)); execute("demo_resume"); }
                 else execute("demo_pause");
             } else {
                 playing_=false;
@@ -480,12 +755,13 @@ private:
             ++revision_;
         } else if (method=="demo_control") {
             NeedDemo(); const std::string action=params.at("action").get<std::string>();
-            if(action=="pause" || action=="resume") execute(action=="pause"?"demo_pause":"demo_resume");
-            else if (action=="seek") { int target=params.at("tick").get<int>(); if(target<0 || target>2000000000) throw std::invalid_argument("invalid demo tick"); execute("demo_gototick "+std::to_string(target)); }
+            if(action=="pause" || action=="resume") {pauseIntent_=action=="pause";execute(action=="pause"?"demo_pause":"demo_resume");}
+            else if (action=="seek") { int target=params.at("tick").get<int>(); if(target<0 || target>2000000000) throw std::invalid_argument("invalid demo tick");const bool preservePause=pauseIntent_.value_or(paused_);pauseIntent_=preservePause;PrepareCosmeticsSeek();if(preservePause)execute("demo_pause");execute("demo_gototick "+std::to_string(target)+(preservePause?" pause":"")); }
             else throw std::invalid_argument("demo action must be pause, resume, or seek");
         } else if (method=="apply_preset") {
             NeedDemo(); NeedCamera(); Project next=project_; next.keys.clear(); next.startTick=std::max(0,tick_);
             const auto name=params.at("name").get<std::string>(); next.duration=params.value("duration",5.0); Finite(next.duration,.01,86400,"duration");
+            if(next.duration!=project_.duration) ResizeRenderRange(next,project_.duration);
             const double distance=params.value("distance",200.0); Finite(distance,1,10000,"distance");
             auto add=[&](double time,const Pose& pose) { Key key; key.id=NewKeyId(); key.time=time; key.pose=pose; next.keys.push_back(key); };
             Pose end=camera_;
@@ -504,6 +780,15 @@ private:
         } else if(method=="undo" || method=="redo") {
             auto& source=method=="undo"?undo_:redo_; auto& target=method=="undo"?redo_:undo_;
             if(source.empty()) throw std::invalid_argument(method+" history is empty");
+            if(!source.back().scene.empty() || !source.back().cosmetics.empty() || !source.back().presentation.empty() || !project_.cosmetics.empty() || !project_.presentation.empty())NeedDemo();
+            cosmetics_.ValidateRequest(source.back().cosmetics);
+            weaponCosmetics_.ValidateRequest(source.back().cosmetics.value("weapon_paints",Json::array()));
+            gloveCosmetics_.ValidateRequest(source.back().cosmetics.value("gloves",Json::array()));
+            presentation_.ValidateRequest(source.back().presentation);
+            scene_.Apply(EffectiveSceneSettings(source.back()));
+            presentation_.SetSceneCapabilities(scene_.Capabilities());
+            try{presentation_.Apply(source.back().presentation);cosmetics_.Apply(source.back().cosmetics);weaponCosmetics_.Apply(source.back().cosmetics.value("weapon_paints",Json::array()));gloveCosmetics_.Apply(source.back().cosmetics.value("gloves",Json::array()));}
+            catch(...){scene_.Apply(EffectiveSceneSettings(project_));presentation_.SetSceneCapabilities(scene_.Capabilities());presentation_.Apply(project_.presentation);cosmetics_.Apply(project_.cosmetics);weaponCosmetics_.Apply(project_.cosmetics.value("weapon_paints",Json::array()));gloveCosmetics_.Apply(project_.cosmetics.value("gloves",Json::array()));throw;}
             target.push_back(project_); project_=source.back(); source.pop_back(); playing_=false; if(mode_=="preview") mode_="hold"; cursor_=std::min(cursor_,project_.duration); ++revision_;
         } else throw std::invalid_argument("unknown live method: "+method);
         return nullptr;
@@ -534,9 +819,15 @@ private:
                 else if(input.value("method",std::string())=="ping") response={{"id",input.value("id",Json(nullptr))},{"result",{{"pong",true},{"abi",Abi}}}};
                 else {
                     auto request=Queue(input); auto future=request->reply.get_future();
-                    const auto expires=Clock::now()+std::chrono::seconds(2);
+                    const auto method=input.at("method").get<std::string>();
+                    const bool appearance=method=="apply_appearance_pack" || method=="reset_appearance" || method=="probe_appearance_pack" || method=="set_player_cosmetics" || method=="reset_player_cosmetics" || method=="set_team_palette" || method=="reset_team_palette" || method=="set_player_weapon_paint" || method=="reset_player_weapon_paint" || method=="set_player_gloves" || method=="reset_player_gloves";
+                    const auto expires=Clock::now()+std::chrono::seconds(appearance?30:2);
                     while(running_ && Clock::now()<expires && future.wait_for(std::chrono::milliseconds(30))!=std::future_status::ready) {}
-                    if(future.wait_for(std::chrono::milliseconds(0))!=std::future_status::ready) { request->cancelled=true; throw std::runtime_error("game thread did not service command within 2 seconds"); }
+                    if(future.wait_for(std::chrono::milliseconds(0))!=std::future_status::ready) {
+                        unsigned queued=0;
+                        if(request->phase.compare_exchange_strong(queued,3))throw std::runtime_error(appearance?"engine command was cancelled before execution after 30 seconds":"game thread did not service command within 2 seconds; cancelled before execution");
+                        throw std::runtime_error("engine operation already started; outcome is unknown until get_state confirms it; do not retry blindly");
+                    }
                     response=future.get();
                 }
                 Send(client,response);
@@ -560,11 +851,31 @@ private:
     std::mutex queueMutex_; std::deque<std::shared_ptr<Request>> queue_;
     std::mutex viewMutex_; Pose observed_,output_; bool observedValid_=false,outputEnabled_=false;
     std::atomic<std::uint64_t> viewWrites_{0};
+    std::optional<bool> pauseIntent_;
     bool demo_=false,paused_=false,hookInstalled_=false,cameraValid_=false,playing_=false,syncDemo_=true,waitingForSeek_=false;
     int tick_=0,previewSeekTick_=0; double tickRate_=64,cursor_=0,previewStartCursor_=0;
     Clock::time_point previewStart_=Clock::now();
     Pose camera_; Project project_; std::string mode_="free",error_,commandError_;
+    SceneEnvironment scene_;
+    AppearancePack appearance_;
+    DemoRefresh demoRefresh_;
+    Execute currentExecute_;
+    Pose appearanceSavedCamera_;
+    double appearanceSavedCursor_=0;
+    int appearanceSavedTick_=0;
+    bool appearanceSavedPaused_=true,appearanceTransition_=false;
+    Json sceneRegistry_=Json::array();
+    std::function<Json(unsigned)> entityInspector_;
+    PlayerCosmetics cosmetics_;
+    Presentation presentation_;
+    WeaponCosmetics weaponCosmetics_;
+    GloveCosmetics gloveCosmetics_;
+    std::uint64_t entityEpoch_=0,entitySnapshot_=0;
+    std::uint64_t cosmeticsRefreshRevision_=std::numeric_limits<std::uint64_t>::max();
+    std::uint64_t cosmeticsGeneration_=0;
+    Json entityProbe_=Json::object();
     std::uint64_t revision_=0,keyId_=0,fileId_=0;
+    std::uint64_t exportRequestId_=0;
     std::deque<Project> undo_,redo_;
 };
 } // namespace cs2_live

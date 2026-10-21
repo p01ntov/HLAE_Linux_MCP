@@ -14,11 +14,11 @@ if not includes.is_dir():
 if not includes.is_dir():
     raise SystemExit("Build native/live/build_live.py first to fetch the pinned JSON headers")
 with tempfile.TemporaryDirectory(prefix="cs2-live-tests-") as temporary:
-    for source in (HERE / "live_controller_test.cpp", HERE / "live_socket_test.cpp", HERE / "compat_math_test.cpp"):
+    for source in (HERE / "live_controller_test.cpp", HERE / "live_socket_test.cpp", HERE / "compat_math_test.cpp", HERE / "appearance_pack_test.cpp", HERE / "team_palette_test.cpp", HERE / "player_cosmetics_test.cpp", HERE / "weapon_cosmetics_test.cpp", HERE / "glove_cosmetics_test.cpp", HERE / "glove_pose_test.cpp", HERE / "glove_render_phase_test.cpp", HERE / "glove_controller_test.cpp", HERE / "presentation_test.cpp", HERE / "hud_presentation_test.cpp", HERE / "demo_refresh_test.cpp", ROOT / "native/tests/capture_environment_test.cpp", ROOT / "native/tests/linux_view_patch_test.cpp"):
         binary = Path(temporary) / source.stem
         subprocess.run(["g++", "-std=c++17", "-Wall", "-Wextra", "-pthread",
                         "-fvisibility=hidden", "-fvisibility-inlines-hidden", "-fno-gnu-unique",
-                        "-Wl,-Bsymbolic-functions", f"-I{includes}",
+                        "-Wl,-Bsymbolic-functions", f"-I{includes}", f"-I{HERE.parent}",
                         str(source), str(HERE.parent / "compat_math.cpp"), "-o", str(binary)], check=True)
         versions = {(int(major), int(minor)) for major, minor in re.findall(rb"GLIBC_(\d+)\.(\d+)", binary.read_bytes())}
         if versions and max(versions) > (2, 38):

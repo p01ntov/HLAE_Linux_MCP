@@ -7,8 +7,11 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import struct
 import sys
 import urllib.request
+from itertools import islice
+from functools import lru_cache
 
 def resource_root() -> Path:
     return Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[2]))
@@ -36,15 +39,17 @@ def sha256(path: Path) -> str:
 def external_environment() -> dict[str, str]:
     """Restore host library lookup for tools launched by a frozen app."""
     environment = os.environ.copy()
-    if not getattr(sys, "frozen", False):
-        return environment
-    original = environment.get("LD_LIBRARY_PATH_ORIG")
-    if original is None:
-        environment.pop("LD_LIBRARY_PATH", None)
-    else:
-        environment["LD_LIBRARY_PATH"] = original
-    for name in ("QT_PLUGIN_PATH", "QT_QPA_PLATFORM_PLUGIN_PATH", "PYTHONHOME", "CS2_CAMERA_LIVE",
-                 "CS2_CAMERA_SOCKET", "CS2_CAMERA_OVERLAY", "CS2_CAMERA_PROJECT", "CS2_CAMERA_HOTKEYS"):
+    frozen = getattr(sys, "frozen", False)
+    if frozen:
+        original = environment.get("LD_LIBRARY_PATH_ORIG")
+        if original is None:
+            environment.pop("LD_LIBRARY_PATH", None)
+        else:
+            environment["LD_LIBRARY_PATH"] = original
+        for name in ("QT_PLUGIN_PATH", "QT_QPA_PLATFORM_PLUGIN_PATH", "PYTHONHOME"):
+            environment.pop(name, None)
+    for name in ("CS2_CAMERA_LIVE",
+                 "CS2_CAMERA_SOCKET", "CS2_CAMERA_OVERLAY", "CS2_CAMERA_PROJECT", "CS2_CAMERA_HOTKEYS", "CS2_CAMERA_DEMO_PATH", "CS2_CAMERA_COSMETICS_CATALOG", "CS2_CAMERA_COSMETICS_CATALOG_ERROR", "CS2_CAMERA_CAPTURE_COSMETICS"):
         environment.pop(name, None)
     # A capture is separate from the in-game editing overlay. Preserve other
     # user overlays while removing only this application's injected library/layer.
@@ -56,7 +61,7 @@ def external_environment() -> dict[str, str]:
     if "VK_INSTANCE_LAYERS" in environment:
         environment["VK_INSTANCE_LAYERS"] = ":".join(value for value in environment["VK_INSTANCE_LAYERS"].split(":") if value != "VK_LAYER_CS2_camera")
     for name in list(environment):
-        if name.startswith("_PYI_"):
+        if frozen and name.startswith("_PYI_"):
             environment.pop(name, None)
     return environment
 
@@ -96,31 +101,183 @@ def validate_media_tools() -> dict[str, str]:
     return tools
 
 
-def steam_roots() -> list[Path]:
-    roots: list[Path] = []
-    for candidate in [Path.home() / ".local/share/Steam", Path.home() / ".steam/steam"]:
-        if candidate.exists() and candidate.resolve() not in roots:
-            roots.append(candidate.resolve())
-    for steam in roots[:]:
-        vdf = steam / "steamapps/libraryfolders.vdf"
-        if vdf.exists():
-            for path in re.findall(r'"path"\s*"([^"]+)"', vdf.read_text()):
-                candidate = Path(path.replace("\\\\", "\\"))
-                if candidate.exists() and candidate.resolve() not in roots:
-                    roots.append(candidate.resolve())
+def _bounded_children(directory: Path, maximum=128) -> list[Path]:
+    try:
+        return [path for path in islice(directory.iterdir(),maximum) if path.is_dir()]
+    except (OSError,RuntimeError):
+        return []
+
+
+def _mounted_library_roots() -> list[Path]:
+    """Inspect mount points and conventional folders, never recurse through disks."""
+    candidates=[]
+    try:
+        with Path("/proc/self/mountinfo").open() as handle:
+            for line in islice(handle,4096):
+                fields=line.split()
+                if len(fields)>5:
+                    path=Path(re.sub(r"\\([0-7]{3})",lambda m:chr(int(m[1],8)),fields[4]))
+                    if str(path).startswith(("/mnt/","/media/","/run/media/")):
+                        candidates.append(path)
+    except OSError:
+        pass
+    for base in (Path("/mnt"),Path("/media"),Path("/run/media")):
+        children=_bounded_children(base)
+        candidates.extend(children)
+        if base!=Path("/mnt"):
+            for child in children:
+                candidates.extend(_bounded_children(child,32))
+    roots=[]
+    seen=set()
+    for disk in candidates[:256]:
+        for candidate in (disk,disk/"SteamLibrary",disk/"Steam",disk/"steam",disk/"Games/SteamLibrary",disk/"Games/Steam",*_bounded_children(disk,64)):
+            try:
+                if (candidate/"steamapps").is_dir():
+                    resolved=candidate.resolve()
+                    if resolved not in seen:
+                        roots.append(resolved);seen.add(resolved)
+            except (OSError,RuntimeError):
+                continue
     return roots
 
 
-def find_game(explicit: str | None = None) -> Path:
+def steam_roots() -> list[Path]:
+    roots: list[Path] = []
+    candidates=[Path.home()/".local/share/Steam",Path.home()/".steam/steam",Path.home()/".steam/root",
+                Path.home()/".var/app/com.valvesoftware.Steam/.local/share/Steam",*_mounted_library_roots()]
+    for candidate in candidates:
+        try:
+            resolved=candidate.resolve()
+            if candidate.is_dir() and resolved not in roots:
+                roots.append(resolved)
+        except (OSError,RuntimeError):
+            continue
+    # Library files also exist in library roots. Follow a bounded queue so a
+    # registered external disk can point to another existing Steam library.
+    for steam in roots:
+        if len(roots)>=128:
+            break
+        vdf=steam/"steamapps/libraryfolders.vdf"
+        try:
+            if not vdf.is_file() or vdf.stat().st_size>1024*1024:
+                continue
+            text=vdf.read_text(encoding="utf-8-sig")
+        except (OSError,UnicodeError):
+            continue
+        for value in re.findall(r'"(?:path|\d+)"\s*"((?:\\.|[^"\\])*)"',text):
+            candidate=Path(re.sub(r'\\([\\"])',r'\1',value)).expanduser()
+            try:
+                if candidate.is_absolute() and candidate.is_dir() and candidate.resolve() not in roots:
+                    roots.append(candidate.resolve())
+                    if len(roots)>=128:
+                        break
+            except (OSError,RuntimeError):
+                continue
+    return roots
+
+
+def find_games(explicit: str | None = None) -> list[Path]:
     candidates = [Path(explicit).expanduser()] if explicit else [
         root / "steamapps/common/Counter-Strike Global Offensive/game" for root in steam_roots()
     ]
+    games=[]
     for candidate in candidates:
-        if (candidate / "game/cs2.sh").exists():
-            candidate /= "game"
-        if (candidate / "cs2.sh").exists() and (candidate / "csgo/gameinfo.gi").exists():
-            return candidate.resolve()
+        try:
+            if (candidate / "game/cs2.sh").is_file():
+                candidate /= "game"
+            if (candidate / "cs2.sh").is_file() and (candidate / "csgo/gameinfo.gi").is_file() and candidate.resolve() not in games:
+                games.append(candidate.resolve())
+        except (OSError,RuntimeError):
+            continue
+    return games
+
+
+def find_game(explicit: str | None = None) -> Path:
+    games=find_games(explicit)
+    if games:
+        return games[0]
     raise RuntimeError("Native CS2 not found; pass --game-dir /path/to/install/game")
+
+
+@lru_cache(maxsize=512)
+def _demo_map_name(path, size, modified):
+    if size<1024*1024:
+        return None
+    try:
+        from .demo import parser
+        value=parser(Path(path)).parse_header().get("map_name")
+        return value if isinstance(value,str) and 1<=len(value)<=128 else None
+    except Exception:
+        return None
+
+
+def _demo_readiness(path, size):
+    # PBDEMS2 fixed-header offsets are absolute command positions:
+    # https://docs.rs/pbdems2/latest/pbdems2/guide/file_structure/index.html
+    with path.open("rb") as handle:
+        header=handle.read(16)
+        if len(header)!=16 or header[:8]!=b"PBDEMS2\0":
+            return False,"Unsupported or incomplete CS2 demo header"
+        file_info,spawn_groups=struct.unpack_from("<II",header,8)
+        if not 16<=file_info<size or spawn_groups and not 16<=spawn_groups<size:
+            return False,"Recording is incomplete: final demo metadata is absent or beyond the downloaded file"
+        handle.seek(file_info)
+        def varint():
+            value=0
+            for shift in range(0,35,7):
+                byte=handle.read(1)
+                if not byte:
+                    raise ValueError("Truncated final demo metadata")
+                value|=(byte[0]&127)<<shift
+                if not byte[0]&128:
+                    return value
+            raise ValueError("Invalid final demo metadata frame")
+        try:
+            command=varint();varint();payload_size=varint()
+            if command&~64!=2 or handle.tell()+payload_size>size:
+                return False,"Recording is incomplete: final demo metadata frame is invalid"
+        except ValueError as error:
+            return False,str(error)
+    return True,""
+
+
+def discover_demos(game_dirs=None, *, limit=500) -> list[dict]:
+    """List local CS2 recordings in game/csgo and downloaded game/csgo/replays."""
+    if type(limit) is not int or not 1<=limit<=2000:
+        raise ValueError("Demo library limit must be an integer in 1..2000")
+    games=find_games() if game_dirs is None else game_dirs
+    recordings=[]
+    seen=set()
+    for game in games[:128]:
+        game=Path(game)
+        for directory in (game/"csgo/replays",game/"csgo"):
+            try:
+                entries=list(islice(directory.iterdir(),8192))
+            except (OSError,RuntimeError):
+                continue
+            for candidate in entries:
+                if candidate.suffix.lower()!=".dem":
+                    continue
+                try:
+                    path=candidate.resolve(strict=True)
+                    if path in seen or not path.is_file():
+                        continue
+                    info=path.stat()
+                    ready,reason=_demo_readiness(path,info.st_size)
+                    seen.add(path)
+                    recordings.append({"path":str(path),"name":path.stem,"filename":path.name,
+                        "game_directory":str(game.resolve()),"modified":info.st_mtime,"modified_ns":info.st_mtime_ns,"size":info.st_size,
+                        "downloaded":directory.name=="replays","ready":ready,
+                        "reason":reason})
+                except (OSError,RuntimeError):
+                    continue
+    recordings=sorted(recordings,key=lambda item:(-item["modified"],item["path"]))[:limit]
+    # Parsing only headers of the latest recordings is cheap and cached by the
+    # exact file fingerprint. Event/player analysis belongs to the MCP tools.
+    for item in recordings[:64]:
+        if item["ready"]:
+            item["map_name"]=_demo_map_name(item["path"],item["size"],item["modified_ns"])
+    return recordings
 
 
 def find_runtime() -> Path:

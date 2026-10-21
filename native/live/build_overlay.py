@@ -57,7 +57,7 @@ def build(cache: Path | None=None) -> Path:
     with (cache / "build.lock").open("a") as lock:
         fcntl.flock(lock,fcntl.LOCK_EX)
         if not (HERE / "editor_ui.h").is_file():raise RuntimeError("editor_ui.h is required")
-        fingerprint=hashlib.sha256((sha(HERE/"overlay.cpp")+sha(HERE/"editor_ui.h")+sha(HERE/"overlay_blur.h")+sha(HERE/"overlay_blur_spv.h")+sha(HERE/"compat_math.cpp")+sha(HERE/"resolver.S")+sha(HERE/"overlay_exports.map")+sha(Path(__file__))+json.dumps(SOURCES)).encode()).hexdigest()
+        fingerprint=hashlib.sha256((sha(HERE/"overlay.cpp")+sha(HERE/"editor_ui.h")+sha(HERE/"cosmetics_catalog.h")+sha(HERE/"overlay_blur.h")+sha(HERE/"overlay_blur_spv.h")+sha(HERE/"compat_math.cpp")+sha(HERE/"resolver.S")+sha(HERE/"overlay_exports.map")+sha(Path(__file__))+json.dumps(SOURCES)).encode()).hexdigest()
         library=cache / "libcs2_camera_overlay.so"
         manifest=cache / "build.json"
         if library.is_file() and manifest.is_file():
