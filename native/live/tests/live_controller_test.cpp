@@ -217,7 +217,6 @@ static void TestAppearanceDemoRefreshPreservesEditor() {
     assert(after["project"]==before["project"] && after["camera"]==before["camera"]);
     assert(after["cursor"]==before["cursor"] && after["revision"]==before["revision"]);
     assert(commands==std::vector<std::string>{"demo_pause"});
-    controller.RestoreAppearance(); // Shutdown never queues a new demo reload.
     unsetenv("CS2_CAMERA_DEMO_PATH");unlink(path.c_str());rmdir(folder);
 }
 

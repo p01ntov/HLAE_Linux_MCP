@@ -45,15 +45,12 @@ def ensure_motion_plugin() -> Path:
     return plugin
 
 
-def verify_cosmetics_capture_support(plugin: Path | None = None, *, require_gloves: bool = False) -> Path:
+def verify_cosmetics_capture_support(plugin: Path | None = None) -> Path:
     plugin = plugin or ensure_motion_plugin()
     binary = plugin.read_bytes()
     if any(marker not in binary for marker in (b"CS2_MVP_MOTION_ABI 3", b"CS2_MVP_ENVIRONMENT_ABI 1",
                                                 b"CS2_MVP_COSMETICS_APPLIED", b"CS2_MVP_COSMETICS_RESTORED")):
         raise RuntimeError("This capture plugin lacks the verified per-player cosmetic readback and restoration adapter")
-    if require_gloves and any(marker not in binary for marker in
-                             (b"CS2_MVP_GLOVES_POSE_ABI 1", b"CS2_MVP_GLOVES_RENDER_ABI 1")):
-        raise RuntimeError("This capture plugin lacks the verified glove pose and render publication adapter")
     return plugin
 
 

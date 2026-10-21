@@ -70,6 +70,18 @@ inline void ValidateCosmetics(const nlohmann::json& value) {
     }
 }
 
+// Production supports builtin agents and team color only. Legacy typed paint
+// validators remain available to isolated research tests, never to this path.
+inline void ValidateSupportedCosmetics(const nlohmann::json& value) {
+    ValidateCosmetics(value);
+    for(const char* key:{"weapon_paints","gloves"})if(value.contains(key))
+        throw std::invalid_argument(std::string(key)+" are disabled in this build");
+}
+inline bool PlayerCosmeticsRequested(const nlohmann::json& value) {
+    return !value.value("players",nlohmann::json::array()).empty() ||
+        (value.contains("team_palette") && value["team_palette"].value("enabled",false));
+}
+
 class PlayerCosmetics {
 public:
     using Json=nlohmann::json;

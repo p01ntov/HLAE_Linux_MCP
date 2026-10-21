@@ -133,25 +133,15 @@ class AppearanceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "vmdl_c"):
                 assets.prepare_override_pack({source: "/tmp/custom.fbx"})
 
-    def test_asset_mcp_catalog_and_pack_prep_are_real_offline_operations(self):
+    def test_retired_asset_pack_tools_are_not_exposed_by_current_mcp(self):
         class NoEngine:
-            def request(self, *args):
-                raise AssertionError("Asset preparation must not send engine commands")
-        original, replacement = list(self.entries)[:2]
-        with patch.dict(os.environ, {"XDG_DATA_HOME": str(self.root / "private")}), \
-             patch.object(assets, "installed_index", return_value=assets.VpkIndex(self.path)):
-            listed = call_tool(NoEngine(), "cs2_assets_appearance_catalog", {"kind":"character","limit":1})
-            self.assertEqual(listed["total"],2)
-            args={"mappings":[{"original":original,"replacement":replacement}]}
-            pack=call_tool(NoEngine(),"cs2_assets_prepare_appearance_pack",args)
-            self.assertEqual((Path(pack["path"])/original).read_bytes(),b"INLINE")
-            self.assertTrue(Path(pack["manifest"]).is_file())
-            self.assertEqual(pack["models"],[original.removesuffix("_c")])
-            with self.assertRaisesRegex(ValueError,"only once"):
-                call_tool(NoEngine(),"cs2_assets_prepare_appearance_pack",{"mappings":args["mappings"]*2})
-            with self.assertRaises(ProtocolError):
-                call_tool(NoEngine(),"cs2_assets_prepare_appearance_pack",{"mappings":args["mappings"]*33})
-        self.assertFalse(TOOL_MAP["cs2_camera_probe_appearance_pack"]["annotations"]["readOnlyHint"])
+            def request(self,*args):
+                raise AssertionError("Removed asset tools must never reach the engine")
+        for name in ("cs2_assets_appearance_catalog","cs2_assets_prepare_appearance_pack","cs2_camera_probe_appearance_pack"):
+            with self.subTest(name=name):
+                self.assertNotIn(name,TOOL_MAP)
+                with self.assertRaises(ProtocolError):
+                    call_tool(NoEngine(),name,{})
 
 
 if __name__ == "__main__":

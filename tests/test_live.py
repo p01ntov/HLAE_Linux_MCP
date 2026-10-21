@@ -201,14 +201,20 @@ class LiveConfigurationTests(unittest.TestCase):
                  patch("cs2_mvp.discovery.sha256", return_value="fake"), \
                  patch("cs2_mvp.csdm.temporary_plugin", return_value=nullcontext()), \
                  patch("cs2_mvp.render.config_backup", return_value=nullcontext()), \
-                 patch.object(live.subprocess, "Popen", return_value=process), \
+                 patch.object(live.subprocess, "Popen", return_value=process) as launch, \
                  patch.object(live, "_write_json", side_effect=write), \
                  patch.object(live.NativeClient, "request", return_value={}), \
                  patch.object(live, "_stop_owned") as stop:
-                with self.assertRaisesRegex(OSError, "descriptor failure"):
-                    live.run_session(demo, headless=True, notify=lambda message: None, windowed=True)
-                stop.assert_called_once()
-                self.assertIs(stop.call_args.args[0], process)
+                for windowed in (False, True):
+                    with self.subTest(windowed=windowed), self.assertRaisesRegex(OSError, "descriptor failure"):
+                        live.run_session(demo, headless=True, notify=lambda message: None,
+                                         windowed=windowed, screen_size=(1920,1080), screen_name="HDMI-A-1")
+                    environment = launch.call_args.kwargs["env"]
+                    self.assertEqual(environment["CS2_CAMERA_FULLSCREEN_WINDOWED"], "0" if windowed else "1")
+                    self.assertEqual(environment["SDL_VIDEO_DISPLAY_PRIORITY"], "HDMI-A-1")
+                    stop.assert_called_once()
+                    self.assertIs(stop.call_args.args[0], process)
+                    stop.reset_mock()
 
     def test_definite_native_hook_failure_reports_guard_and_restores_owned_session(self):
         from contextlib import nullcontext

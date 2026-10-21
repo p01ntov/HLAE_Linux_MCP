@@ -48,7 +48,7 @@ def external_environment() -> dict[str, str]:
             environment["LD_LIBRARY_PATH"] = original
         for name in ("QT_PLUGIN_PATH", "QT_QPA_PLATFORM_PLUGIN_PATH", "PYTHONHOME"):
             environment.pop(name, None)
-    for name in ("CS2_CAMERA_LIVE",
+    for name in ("CS2_CAMERA_LIVE", "CS2_CAMERA_FULLSCREEN_WINDOWED",
                  "CS2_CAMERA_SOCKET", "CS2_CAMERA_OVERLAY", "CS2_CAMERA_PROJECT", "CS2_CAMERA_HOTKEYS", "CS2_CAMERA_DEMO_PATH", "CS2_CAMERA_COSMETICS_CATALOG", "CS2_CAMERA_COSMETICS_CATALOG_ERROR", "CS2_CAMERA_CAPTURE_COSMETICS"):
         environment.pop(name, None)
     # A capture is separate from the in-game editing overlay. Preserve other

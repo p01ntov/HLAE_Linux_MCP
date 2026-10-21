@@ -44,10 +44,6 @@ SCENE_FIELDS.update({name: {"type": "number", "minimum": bounds[0], "maximum": b
     "dof_far_crisp": (0, 100000), "dof_far_blurry": (0, 100000), "dof_tilt": (0, 1),
     "dof_radius": (0, 10), "dof_max_blur": (0, 64), "bloom_strength": (0, 10), "exposure": (0, 16)}.items()})
 SCENE = object_schema(SCENE_FIELDS)
-ENGINE_MODEL = {"type": "string", "minLength": 1, "maxLength": 512,
-                "description": "Safe engine-relative .vmdl path under agents/, characters/, models/ or weapons/."}
-APPEARANCE = object_schema({"path": {"type": "string", "minLength": 1, "maxLength": 4096},
-                            "models": {"type": "array", "items": ENGINE_MODEL, "minItems": 1, "maxItems": 32}}, ("path", "models"))
 STEAM_ID = {"type": "string", "minLength": 1, "maxLength": 20, "pattern": r"^[1-9][0-9]{0,19}$",
             "format": "steamid64", "description": "Exact nonzero decimal uint64 SteamID64, without leading zeroes; read current players from get_state.cosmetics.players."}
 PLAYER_COSMETICS_FIELDS = {"steam_id": STEAM_ID,
@@ -56,28 +52,16 @@ PLAYER_COSMETICS_FIELDS = {"steam_id": STEAM_ID,
                            "agent_item_def": {"type": "integer", "minimum": 1, "maximum": 65535,
                                               "description": "Exact builtin agent item_def from cosmetics_catalog matching the player's current T/CT team."}}
 PLAYER_COSMETICS = object_schema(PLAYER_COSMETICS_FIELDS, ("steam_id", "agent_item_def"))
-WEAPON_PAINT_FIELDS = {"steam_id": STEAM_ID, "nickname": PLAYER_COSMETICS_FIELDS["nickname"],
-                       "item_def": {"type": "integer", "minimum": 1, "maximum": 65535},
-                       "paint_kit": {"type": "integer", "minimum": 1, "maximum": 65535},
-                       "wear": {"type": "number", "minimum": 0, "maximum": 1,
-                                "description": "Explicit wear must also fit the installed paint kit's wear_min/max. Omit for native default 0.01 clamped to that range."},
-                       "seed": {"type": "integer", "minimum": 0, "maximum": 1000, "default": 0}}
-WEAPON_PAINT = object_schema(WEAPON_PAINT_FIELDS, ("steam_id", "item_def", "paint_kit"))
-GLOVE_FIELDS = {**WEAPON_PAINT_FIELDS, "item_def": {**WEAPON_PAINT_FIELDS["item_def"],
-                "description": "Exact builtin glove item_def with an evidenced paint-kit association."}}
-GLOVE = object_schema(GLOVE_FIELDS, ("steam_id", "item_def", "paint_kit"))
 RGB = {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 255}, "minItems": 3, "maxItems": 3}
 TEAM_PALETTE_FIELDS = {"enabled": {"type": "boolean"}, "t": RGB, "ct": RGB}
 TEAM_PALETTE = object_schema(TEAM_PALETTE_FIELDS, ("enabled", "t", "ct"))
-COSMETICS = object_schema({"players": {"type": "array", "items": PLAYER_COSMETICS, "maxItems": 128},
-                          "weapon_paints": {"type": "array", "items": WEAPON_PAINT, "maxItems": 512},
-                          "gloves": {"type": "array", "items": GLOVE, "maxItems": 128},
-                          "team_palette": TEAM_PALETTE})
+COSMETICS = {**object_schema({"players": {"type": "array", "items": PLAYER_COSMETICS, "maxItems": 128},
+                             "team_palette": TEAM_PALETTE}), "format": "agent-cosmetics"}
 PRESENTATION_FIELDS = {"view": {"type": "string", "enum": ["player", "free"]},
                        "hud": {"type": "string", "enum": ["gameplay", "demo", "hidden"]}}
 PRESENTATION = {**object_schema(PRESENTATION_FIELDS), "format": "presentation"}
 
-PROJECT = object_schema({"name": {"type": "string", "maxLength": 256},
+PROJECT = {**object_schema({"name": {"type": "string", "maxLength": 256},
                          "start_tick": {"type": "integer", "minimum": 0, "maximum": 2000000000},
                          "duration": {"type": "number", "minimum": .01, "maximum": 86400},
                          "interpolation": {"type": "string", "enum": ["smooth", "linear"]},
@@ -85,7 +69,7 @@ PROJECT = object_schema({"name": {"type": "string", "maxLength": 256},
                          "scene": SCENE,
                          "cosmetics": COSMETICS,
                          "presentation": PRESENTATION,
-                         "keys": {"type": "array", "items": object_schema(KEY_FIELDS, ("id", "time", "position", "angles")), "maxItems": 4096}}, ("keys",))
+                         "keys": {"type": "array", "items": object_schema(KEY_FIELDS, ("id", "time", "position", "angles")), "maxItems": 4096}}, ("keys",)), "format": "camera-project"}
 
 GUIDE_URI = "cs2-camera://guides/agent"
 GUIDE_RESOURCE = {"uri": GUIDE_URI, "name": "mcp-agent-guide", "title": "Demo evidence and camera authoring workflow",
@@ -106,6 +90,7 @@ def tool(method, description, properties=None, required=(), read_only=False):
 TOOLS = [
     tool("get_state", "Read the live camera, demo tick, project keys, preview cursor and hook health. The in-game editor and MCP share this state.", read_only=True),
     tool("set_presentation", "Request player/free spectator view and gameplay/demo/hidden HUD. Read get_state.presentation.capabilities: requestable permits a request, available/actual view and HUD readback confirm current state; pending is not completion. Gameplay HUD requires player view and its separate native adapter. Its live implementation is partial: spectator money and weapon panels can remain visible, so successful requests and readback do not confirm a complete player HUD. Free+gameplay is rejected. Saved in project.presentation with undo/redo. Offline capture supports free authored camera and demo/hidden HUD; player view or gameplay HUD export fails explicitly until wired.", PRESENTATION_FIELDS),
+    tool("select_player", "Watch a demo player identified by their exact SteamID64 from get_state.cosmetics.players. Releases the held authored camera without deleting keys or changing the HUD choice. Check get_state.presentation.selected_player, selection_pending and capabilities.select_player; a submitted request is not a confirmed observer target.", {"steam_id": STEAM_ID}, ("steam_id",)),
     tool("set_camera", "Set the live cinematic camera without restarting CS2. Coordinates are Source world units; angles are degrees. Changes hold the camera at this pose. FOV 1..179 changes the current view; editing a saved key requires update_key. Offline capture ABI 3 supports key FOV 30..140.", CAMERA_FIELDS),
     tool("release_camera", "Release cinematic control and return to the demo's normal spectator camera."),
     tool("add_key", "Add a camera key to the project. Omit pose to capture the current live view; omit time to use the timeline cursor.", {k: v for k, v in KEY_FIELDS.items() if k != "id"}),
@@ -133,9 +118,6 @@ TOOLS = [
     tool("set_scene", "Apply whitelisted scene effects to the running -insecure demo. First read get_state.scene_capabilities: only available=true controls may be changed, and runtime bounds/types are authoritative. Native code validates and reads back actual engine values, rejecting an unsupported batch. DOF planes must satisfy near_blurry<=near_crisp<=far_crisp<=far_blurry; dof_override enables explicit focus. Only use depth_of_field when that separate control is available; its absence does not disable available focus controls. Saved as project.scene with undo/redo. This is not a skin/model/material API. A gray-map material override is unavailable.",
          {"settings": SCENE}, ("settings",)),
     tool("reset_scene", "Restore this session's original engine values for scene effects and clear project.scene overrides. This does not reset camera keys."),
-    tool("apply_appearance_pack", "Use the available native appearance adapter to mount a validated compiled resource pack and refresh listed engine .vmdl resources. Read get_state.appearance_capabilities first: availability may be false while safe refresh is under validation. Global replacement affects every entity using a resource, not individual inventory/paint kits. mounted_verified or reload_requested does not prove the rendered result. A supported adapter may reload the same demo to refresh resources. Use cs2_assets_prepare_appearance_pack for builtin replacements.", APPEARANCE["properties"], APPEARANCE["required"]),
-    tool("reset_appearance", "Reset the active appearance adapter to stock resources; a supported adapter may reload this demo. Check capabilities first and visually verify restoration. Base game files remain unchanged."),
-    tool("probe_appearance_pack", "Validate a compiled pack, temporarily mount its directory in the global GAME search path and verify exact lookup bytes, then unmount without reloading models. Pause the demo and read appearance_capabilities.probe_available first. This filesystem diagnostic changes transient search-path state; no rendered skin change is claimed.", APPEARANCE["properties"], APPEARANCE["required"]),
     tool("request_export", "Ask this session's desktop launcher to open the export window. With a terminal-only launcher, use its Export UI through the desktop app; this request alone does not start a render."),
     tool("inspect_entities", "Read bounded native actor/entity evidence from the local demo: validated build/profile, class/team and available player identities. No raw addresses or mutation are exposed. For cosmetics, also inspect get_state.cosmetics.players and category capabilities before editing.",
          {"limit": {"type": "integer", "minimum": 1, "maximum": 64, "default": 64}}, read_only=True),
@@ -146,13 +128,7 @@ TOOLS = [
     tool("set_team_palette", "Edit team colors in the running -insecure demo. First read get_state.cosmetics.capabilities.team_palette; available must be true to enable it. t/ct are integer RGB triples; omitted fields preserve current settings or session defaults. Saved as project.cosmetics.team_palette with undo/redo. render_verified_1p/render_verified_3p=false means rendering still needs visual verification.",
          TEAM_PALETTE_FIELDS),
     tool("reset_team_palette", "Restore original player colors and remove the saved team palette override. Read get_state.cosmetics capabilities/state and visually verify restoration. Supports undo/redo."),
-    tool("set_player_weapon_paint", "Set a paint kit on a specific SteamID's currently owned matching item_def. First read get_state.cosmetics.capabilities.weapons and current actor/item evidence. MCP checks the installed item/paint association and explicit wear bounds; native separately rechecks capability, ownership, entity lifetime and installed catalog. Weapon/knife item swaps are unavailable; this changes paint on an existing item. Native readback with render_verified_1p/render_verified_3p=false requires visual inspection. Saved in project.cosmetics.weapon_paints; offline capture requires the matching native cosmetic readback and restoration adapter.", WEAPON_PAINT_FIELDS, ("steam_id", "item_def", "paint_kit")),
-    tool("reset_player_weapon_paint", "Restore the selected SteamID's original weapon paint. Include item_def to reset only that matching item; omit it to reset the player's paint overrides.",
-         {"steam_id": STEAM_ID, "item_def": WEAPON_PAINT_FIELDS["item_def"]}, ("steam_id",)),
-    tool("set_player_gloves", "Select a builtin glove item and associated paint kit for one exact SteamID64. First read get_state.cosmetics.capabilities.gloves and get_state.glove_cosmetics. MCP checks the installed glove/paint association and explicit wear bounds; native rechecks the current pawn, team, item lifetime and safe engine snapshot before any write. nickname is a display label. Saved in project.cosmetics.gloves with undo/redo. Inspect applied, ready, materials_pending and restoration_unresolved separately; render_verified_1p/render_verified_3p=false requires visual verification. Offline glove capture requires the current pose/render-publication and restoration adapter plus exact item/finish, world/HUD poses and completed material jobs before recording. World scene objects must be published; HUD visibility is required only when its validated parent is enabled, while HUD pose/material checks remain required. The AURA 5030/10018 case passed live apply/reset and a real 125-frame Qt export; this does not validate the full catalogue.",
-         GLOVE_FIELDS, ("steam_id", "item_def", "paint_kit")),
-    tool("reset_player_gloves", "Restore the selected SteamID64's original glove item through its exact retained native snapshot and remove its saved glove override. Read get_state.glove_cosmetics: confirm the selected player's saved override is removed, its observed original item is restored, and its row has no error or unresolved restoration. owned_overrides counts all players' retained glove journals and reaches zero after all glove overrides are reset.",
-         {"steam_id": STEAM_ID}, ("steam_id",)),
+
 ]
 
 DEMO_PATH = {"type": "string", "minLength": 1, "maxLength": 4096,
@@ -183,27 +159,15 @@ TOOLS += [
     demo_tool("player_positions", "Read one player's recorded world origin, view pitch/yaw, health and alive state at up to 32 exact demo ticks. Missing samples are reported, never guessed. Positions do not prove camera visibility or collision clearance.",
               {"player": PLAYER, "ticks": {"type": "array", "items": TICK, "minItems": 1, "maxItems": 32}}, ("player", "ticks")),
 ]
-COMPILED_MODEL = {"type": "string", "minLength": 1, "maxLength": 512,
-                  "description": "Exact compiled .vmdl_c resource path returned by appearance_catalog."}
 TOOLS += [
-    {**tool("cosmetics_catalog", "List builtin game cosmetic definitions and localized names from installed items_game: agents, weapons/knives or gloves. Agent team filtering is strict CT/T from used_by_classes. Returns real item_def, model paths and paint-kit IDs only with explicit pairing evidence. Unassigned paint kits are separately labeled and must not be assumed compatible. Catalog lookup does not apply cosmetics or modify Steam inventory; native per-player application requires a separately available adapter.",
+    {**tool("cosmetics_catalog", "List builtin agent definitions and localized names from the installed game. Agent team filtering is strict CT/T from used_by_classes. Returns real agent item_def and compiled model paths; it does not apply cosmetics or modify Steam inventory. Use get_state.cosmetics.capabilities.agents before selecting an agent. Weapon skins, knives, gloves and global appearance packs are not supported in this build.",
             {"game_dir": {"type":"string","minLength":1,"maxLength":4096},
-             "kind": {"type":"string","enum":["agents","weapons","knives","gloves"],"default":"agents"},
-             "team": {"type":"string","enum":["CT","T"]}, "weapon": {"type":"string","minLength":1,"maxLength":256},
+             "kind": {"type":"string","enum":["agents"],"default":"agents"},
+             "team": {"type":"string","enum":["CT","T"]},
              "search": {"type":"string","maxLength":256}, "limit": {"type":"integer","minimum":1,"maximum":100},
              "offset": {"type":"integer","minimum":0,"maximum":100000},
              "language": {"type":"string","enum":["english","russian"],"default":"english"}}, read_only=True),
      "name":"cs2_assets_cosmetics_catalog"},
-    {**tool("appearance_catalog", "Read the installed game's VPK2 index and list compiled character, weapon and glove model resources. Search and pagination are bounded. This catalogs builtin resources without applying them or exporting game assets.",
-            {"game_dir": {"type": "string", "minLength": 1, "maxLength": 4096},
-             "kind": {"type": "string", "enum": ["all", "character", "weapon", "glove", "other"], "default": "all"},
-             "search": {"type": "string", "maxLength": 256}, "limit": {"type": "integer", "minimum": 1, "maximum": 100},
-             "offset": {"type": "integer", "minimum": 0, "maximum": 500000}}, read_only=True),
-     "name": "cs2_assets_appearance_catalog"},
-    {**tool("prepare_appearance_pack", "Prepare a new private global-resource override pack from installed VPK models. Each mapping writes replacement compiled bytes at the original resource path. CRC32 is checked; original game files stay untouched. Returns path/models for apply_appearance_pack, but preparation does not mount or visually verify anything. All Valve asset bytes remain in this user's data directory.",
-            {"game_dir": {"type": "string", "minLength": 1, "maxLength": 4096},
-             "mappings": {"type": "array", "items": object_schema({"original": COMPILED_MODEL, "replacement": COMPILED_MODEL}, ("original", "replacement")), "minItems": 1, "maxItems": 32}}, ("mappings",)),
-     "name": "cs2_assets_prepare_appearance_pack"},
 ]
 TOOL_MAP = {item["name"]: item for item in TOOLS}
 
@@ -229,6 +193,10 @@ def validate(value, schema, path="arguments"):
     if "enum" in schema and value not in schema["enum"]:
         raise ProtocolError(-32602, f"{path} must be one of {schema['enum']}")
     if kind == "object":
+        if schema.get("format") == "camera-project":
+            reject_removed_cosmetics(value)
+        elif schema.get("format") == "agent-cosmetics":
+            reject_removed_cosmetics({"cosmetics":value})
         for key in schema.get("required", []):
             if key not in value:
                 raise ProtocolError(-32602, f"{path}.{key} is required")
@@ -256,64 +224,40 @@ def validate(value, schema, path="arguments"):
             raise ProtocolError(-32602, f"{path} must be a display string up to 128 UTF-8 bytes")
 
 
-def _validate_paints(values, kinds):
-    """Metadata preflight only; every mutation still goes through native guards."""
-    if not values:
+def reject_removed_cosmetics(project):
+    """Reject legacy skin requests without deleting portable project data."""
+    if not isinstance(project, dict):
         return
-    from .cosmetics_catalog import installed_catalog, validate_paint_association
-    try:
-        game = session_descriptor().get("game_directory")
-    except LiveError:
-        game = None
-    catalog = installed_catalog(game)
-    by_paint = {paint["id"]: paint for paint in catalog["paint_kits"]}
-    for value in values:
-        item = validate_paint_association(value["item_def"], value["paint_kit"], catalog)
-        if item["kind"] not in kinds:
-            raise ValueError("Requested cosmetic category does not match the installed item/paint association")
-        paint = by_paint[value["paint_kit"]]
-        if "wear" in value and (paint.get("wear_min") is not None and value["wear"] < paint["wear_min"]
-                                or paint.get("wear_max") is not None and value["wear"] > paint["wear_max"]):
-            raise ValueError("Explicit wear is outside the selected paint kit's installed wear_min/wear_max")
-
-
-def validate_weapon_paints(values):
-    _validate_paints(values, {"weapon", "knife"})
-
-
-def validate_gloves(values):
-    if len({value["steam_id"] for value in values}) != len(values):
-        raise ValueError("Each SteamID may have only one glove override")
-    _validate_paints(values, {"glove"})
+    if "appearance" in project:
+        raise ProtocolError(-32602, "Global appearance packs are not supported in this build; remove project.appearance explicitly before loading or exporting")
+    cosmetics = project.get("cosmetics")
+    if isinstance(cosmetics, dict):
+        for field in ("weapon_paints", "gloves"):
+            if field in cosmetics:
+                raise ProtocolError(-32602, f"project.cosmetics.{field} is not supported in this build; remove it explicitly before loading or exporting")
 
 
 def _project_cosmetics_preflight(project):
+    reject_removed_cosmetics(project)
     if "cosmetics" not in project:
         return
     cosmetics = project["cosmetics"]
     # Loading portable files may include format/version metadata, but new
     # typed fields still receive schema validation before native import.
     validate(cosmetics, COSMETICS, "project.cosmetics")
-    validate_weapon_paints(cosmetics.get("weapon_paints", []))
-    validate_gloves(cosmetics.get("gloves", []))
 
 
 def call_tool(client: NativeClient, name: str, arguments: dict):
     definition = TOOL_MAP.get(name)
     if definition is None:
         raise ProtocolError(-32602, f"Unknown tool: {name}")
+    if name == "cs2_camera_set_project":
+        reject_removed_cosmetics(arguments)
     validate(arguments, definition["inputSchema"])
     if name.startswith("cs2_assets_"):
         if name == "cs2_assets_cosmetics_catalog":
             from .cosmetics_catalog import query_catalog
             return query_catalog(**arguments)
-        from . import appearance
-        if name == "cs2_assets_appearance_catalog":
-            return appearance.catalog(**arguments)
-        mappings = arguments["mappings"]
-        if len({item["original"] for item in mappings}) != len(mappings):
-            raise ValueError("Each original resource may appear only once in a pack")
-        return appearance.prepare_override_pack({item["original"]: item["replacement"] for item in mappings}, arguments.get("game_dir"))
     if name.startswith("cs2_demo_"):
         # Keep parser/Rust/dataframe imports lazy for ordinary live MCP use.
         from . import demo_analysis
@@ -332,10 +276,6 @@ def call_tool(client: NativeClient, name: str, arguments: dict):
     method = name.removeprefix("cs2_camera_")
     if method == "set_presentation":
         validate(arguments, PRESENTATION)
-    elif method == "set_player_weapon_paint":
-        validate_weapon_paints([arguments])
-    elif method == "set_player_gloves":
-        validate_gloves([arguments])
     elif method == "set_project":
         _project_cosmetics_preflight(arguments)
     elif method == "import_project":
@@ -357,6 +297,7 @@ def call_tool(client: NativeClient, name: str, arguments: dict):
             _project_cosmetics_preflight(project)
             return client.request("import_project", {"project": project})
         project = client.request("export_project")
+        _project_cosmetics_preflight(project)
         mode = "w" if arguments.get("overwrite", False) else "x"
         with path.open(mode) as handle:
             json.dump(project, handle, ensure_ascii=False, indent=2, allow_nan=False)
@@ -388,7 +329,7 @@ class Server:
                 self.initialized = True
                 result = {"protocolVersion": version if version in SUPPORTED_PROTOCOLS else PROTOCOL_VERSION,
                           "capabilities": {"tools": {"listChanged": False}, "resources": {"subscribe": False, "listChanged": False}},
-                          "serverInfo": {"name": "cs2-camera-studio", "version": "0.1.1"},
+                          "serverInfo": {"name": "cs2-camera-studio", "version": "0.1.2"},
                           "instructions": "Read resource cs2-camera://guides/agent first for the evidence-to-camera workflow. Offline cs2_demo_* tools inspect local .dem files and find real event ticks without launching CS2; pass demo or use the active launcher demo. Never invent kills, ticks, player positions or supported scene effects. Camera tools connect to an already running local CS2 -insecure demo session; read get_state and hook health before editing. Project edits share the in-game editor and support undo. No online play or arbitrary engine commands."}
             elif method == "ping":
                 result = {}

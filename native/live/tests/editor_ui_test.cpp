@@ -590,7 +590,7 @@ void PlayerCosmetics() {
   for (int i = 0; i < 3; ++i) f.Step();
   f.Click("General");
   for (int i = 0; i < 3; ++i) f.Step();
-  f.Click("Models and skins");
+  f.Click("Player agents");
   for (int i = 0; i < 3; ++i) f.Step();
   auto popup = [&](const char* wanted) {
     for (const auto& entry : f.submitted.items)
@@ -630,8 +630,10 @@ void PlayerCosmetics() {
   f.commands.clear();
   f.Click("Apply to player");
   Require(f.commands.empty(), "Missing selected player allowed apply to another target");
-  f.Click("Import...");
-  Require(f.commands.empty(), "Unavailable per-player custom import emitted an engine command");
+  for (const auto& entry : f.submitted.items)
+    Require(entry.second.label != "Import..." && entry.second.label != "##cosmetic_category" &&
+            entry.second.label != "Apply gloves" && entry.second.label != "Apply finish",
+            "Removed skin controls remained in the agent panel");
 }
 
 void PresentationSelectors() {
@@ -677,119 +679,50 @@ void PresentationSelectors() {
   Require(f.One("update_key", "fov") == 70, "FOV editing must update the selected animation key");
 }
 
-void WeaponPaintControls() {
+void ObservedPlayerSelector() {
   Fixture f;
-  f.editor.cosmetics_catalog = {
-      {"agents", Json::array()},
-      {"weapons", Json::array({{{"item_def", 7}, {"kind", "weapon"}, {"display_name", "AK-47"}, {"paint_kits", {282}}},
-                               {{"item_def", 9}, {"kind", "weapon"}, {"display_name", "AWP"}, {"paint_kits", {344}}}})},
-      {"paint_kits", Json::array({{{"id", 282}, {"display_name", "Redline"}, {"wear_min", .1}, {"wear_max", .7}},
-                                  {{"id", 344}, {"display_name", "Dragon Lore"}, {"wear_min", 0}, {"wear_max", .7}}})}};
-  f.state["cosmetics"] = {{"players", Json::array({{{"steam_id", "76561198000000001"}, {"nickname", "Target"}, {"team", 2}}})},
-                            {"capabilities", Json::object()}, {"stale", false}};
-  f.state["weapon_cosmetics"] = {{"capability", {{"available", true}}}, {"stale", false},
-      {"weapons", Json::array({{{"steam_id", "76561198000000001"}, {"item_def", 7}, {"ready", true}, {"active", true}},
-                               {{"steam_id", "76561198000000002"}, {"item_def", 9}, {"ready", true}}})}};
-  f.Click("General");
-  for (int i = 0; i < 3; ++i) f.Step();
-  f.Click("Models and skins");
-  for (int i = 0; i < 3; ++i) f.Step();
-  auto popup = [&](const char* label) {
-    for (const auto& entry : f.submitted.items)
-      if (entry.second.label == label) return entry.second.window;
-    throw std::runtime_error(std::string("Missing weapon option: ") + label);
-  };
-  f.Click("##cosmetic_category");f.Step();
-  const auto categories = popup("Weapons");
-  f.Click("Weapons", 0, categories.c_str());
-  for (int i = 0; i < 3; ++i) f.Step();
-  f.Click("##cosmetic_weapon");f.Step();
-  for (const auto& entry : f.submitted.items)
-    Require(entry.second.label != "AWP", "Other player's weapon leaked into owned-item choices");
-  const auto weapons = popup("AK-47");f.Click("AK-47", 0, weapons.c_str());
-  f.Click("##cosmetic_finish");f.Step();
-  for (const auto& entry : f.submitted.items)
-    Require(entry.second.label != "Dragon Lore", "Finish for another item leaked into compatible choices");
-  const auto finishes = popup("Redline");f.Click("Redline", 0, finishes.c_str());
-  f.Type("##cosmetic_wear", "0.01");
-  f.Type("##cosmetic_seed", "1200");
-  f.commands.clear();f.Click("Apply finish");
-  Require(f.One("set_player_weapon_paint", "steam_id") == "76561198000000001", "Weapon finish lost selected player identity");
-  Require(f.commands[0].arguments["item_def"] == 7 && f.commands[0].arguments["paint_kit"] == 282,
-          "Finish application lost weapon/paint definition");
-  Near(f.commands[0].arguments["wear"].get<double>(), .1, "Per-finish wear minimum");
-  Require(f.commands[0].arguments["seed"] == 1000, "Pattern seed escaped supported bound");
-  f.commands.clear();f.Click("Restore finish");
-  Require(f.One("reset_player_weapon_paint", "item_def") == 7, "Finish restore must target this owned item");
-}
-void GloveControls() {
-  Fixture f;
-  f.editor.cosmetics_catalog = {
-      {"gloves", Json::array({{{"item_def", 5030}, {"display_name", "Sport Gloves"}, {"allowed_teams", {2, 3}}, {"paint_kits", {10018}}},
-                              {{"item_def", 5028}, {"display_name", "Default T gloves"}, {"allowed_teams", {2}}, {"paint_kits", Json::array()}},
-                              {{"item_def", 5035}, {"display_name", "CT only test"}, {"allowed_teams", {3}}, {"paint_kits", {10026}}}})},
-      {"paint_kits", Json::array({{{"id", 10018}, {"category", "glove"}, {"display_name", "Hedge Maze"}, {"wear_min", .06}, {"wear_max", .8}},
-                                  {{"id", 10026}, {"category", "glove"}, {"display_name", "Other glove finish"}},
-                                  {{"id", 282}, {"category", "weapon"}, {"display_name", "Redline"}}})}};
-  f.state["cosmetics"] = {{"players", Json::array({{{"steam_id", "76561198000000001"}, {"nickname", "Target"}, {"team", 2}}})},
-                          {"capabilities", Json::object()}, {"stale", false}};
-  f.state["glove_cosmetics"] = {{"capability", {{"available", true}}}, {"stale", false},
-      {"gloves", Json::array({{{"steam_id", "76561198000000001"}, {"item_def", 5028}, {"ready", true}, {"item_readable", true}},
-                              {{"steam_id", "76561198000000002"}, {"item_def", 5035}, {"requested_item_def", 5035}, {"paint_kit", 10026}, {"ready", true}, {"item_readable", true}}})}};
-  f.Click("General");
-  for (int i = 0; i < 3; ++i) f.Step();
-  f.Click("Models and skins");
-  for (int i = 0; i < 3; ++i) f.Step();
-  auto popup = [&](const char* label) {
-    for (const auto& entry : f.submitted.items)
-      if (entry.second.label == label) return entry.second.window;
-    throw std::runtime_error(std::string("Missing glove option: ") + label);
-  };
-  f.Click("##cosmetic_category");f.Step();
-  const auto categories = popup("Gloves");f.Click("Gloves", 0, categories.c_str());
-  for (int i = 0; i < 3; ++i) f.Step();
-  f.Click("##glove_item");f.Step();
-  for (const auto& entry : f.submitted.items) {
-    Require(entry.second.label != "CT only test", "Wrong-team glove leaked into current player's choices");
-    Require(entry.second.label != "Default T gloves", "Unpaintable default must restore actual original instead of substituting an item");
-  }
-  const auto items = popup("Sport Gloves");f.Click("Sport Gloves", 0, items.c_str());
+  f.state["presentation"] = {{"view", "player"}, {"hud", "demo"},
+      {"selected_player", nullptr}, {"selection_pending", false},
+      {"capabilities", {{"select_player", {{"requestable", true}, {"available", true}}}}}};
+  f.state["cosmetics"] = {{"stale", false}, {"players", Json::array({
+      {{"steam_id", "76561198000000001"}, {"nickname", "Alpha"}, {"team", 3}},
+      {{"steam_id", "76561198000000002"}, {"nickname", "Bravo"}, {"team", 2}},
+      {{"steam_id", "76561198000000003"}, {"nickname", "Bravo"}, {"team", 3}}})}};
   f.Step();
-  f.Click("##glove_finish");f.Step();
-  for (const auto& entry : f.submitted.items)
-    Require(entry.second.label != "Other glove finish" && entry.second.label != "Redline", "Incompatible finish leaked into glove selector");
-  const auto finishes = popup("Hedge Maze");f.Click("Hedge Maze", 0, finishes.c_str());
-  f.Type("##glove_wear", "0.001");f.Type("##glove_seed", "1200");
-  const Json glove_rows = f.state["glove_cosmetics"]["gloves"];
-  f.state["glove_cosmetics"]["gloves"] = Json::array();f.Step();
-  f.commands.clear();f.Click("Apply gloves");
-  Require(f.commands.empty(), "Missing glove row permitted application");
-  f.state["glove_cosmetics"]["gloves"] = glove_rows;
-  for (int i = 0; i < 3; ++i) f.Step();
-  f.commands.clear();f.Click("Apply gloves");
-  Require(f.One("set_player_gloves", "steam_id") == "76561198000000001", "Glove selection lost selected player identity");
-  Require(f.commands[0].arguments["item_def"] == 5030 && f.commands[0].arguments["paint_kit"] == 10018,
-          "Glove selection lost compatible item/paint pair");
-  Near(f.commands[0].arguments["wear"].get<double>(), .06, "Glove wear minimum");
-  Require(f.commands[0].arguments["seed"] == 1000, "Glove seed escaped supported bound");
-  f.Click("##glove_wear");
-  ImGui::GetIO().AddInputCharactersUTF8("0.123");f.Step();
-  auto& echoed = f.state["glove_cosmetics"]["gloves"][0];
-  echoed.update({{"requested_item_def", 5030}, {"paint_kit", 10018}, {"wear", .6}, {"seed", 7}});
-  f.Step();f.Key(ImGuiKey_Enter);f.Step();
-  f.commands.clear();f.Click("Apply gloves");
-  Near(f.One("set_player_gloves", "wear").get<double>(), .123, "Asynchronous echo overwrote an active glove edit");
-  Require(f.commands[0].arguments["seed"] == 1000, "Asynchronous echo overwrote unsent glove draft");
-  f.state["glove_cosmetics"]["stale"] = true;f.Step();
-  f.commands.clear();f.Click("Apply gloves");
-  Require(f.commands.empty(), "Stale glove state permitted a new mutation");
-  f.Click("Restore gloves");
-  Require(f.One("reset_player_gloves", "steam_id") == "76561198000000001", "Glove restore lost original target");
-  f.state["glove_cosmetics"]["stale"] = false;
-  f.state["glove_cosmetics"]["gloves"][0]["restoration_unresolved"] = true;f.Step();
-  f.commands.clear();f.Click("Apply gloves");
-  Require(f.commands.empty(), "Unresolved glove baseline permitted another mutation");
+  const Json keys = f.state["project"]["keys"];
+  f.commands.clear();
+  f.Click("##observed_player", 0, "##CS2CinematicTransport");
+  f.Step();
+  std::string popup;
+  bool duplicate_distinguished = false;
+  for (const auto& entry : f.submitted.items) {
+    if (entry.second.label == "Bravo [T] #00002") popup = entry.second.window;
+    if (entry.second.label == "Bravo [CT] #00003") duplicate_distinguished = true;
+  }
+  Require(!popup.empty(), "Transport player selector did not list demo nicknames");
+  Require(duplicate_distinguished, "Duplicate nicknames were not distinguishable by team and SteamID suffix");
+  f.Click("Bravo [T] #00002", 0, popup.c_str());
+  Require(f.commands.size() == 1 && f.commands[0].method == "select_player",
+          "Choosing a player did not emit exactly one spectator request");
+  Require(f.commands[0].arguments == Json{{"steam_id", "76561198000000002"}},
+          "Spectator selection used a nickname/index instead of exact SteamID");
+  Require(f.state["project"]["keys"] == keys, "Player selection changed camera keys");
+  f.commands.clear();
+  f.state["cosmetics"]["stale"] = true;
+  f.Step();
+  f.Click("##observed_player", 0, "##CS2CinematicTransport");
+  Require(f.commands.empty(), "Stale demo players allowed spectator selection");
+  f.state["cosmetics"]["stale"] = false;
+  f.Step();
+  f.Click("General");
+  f.Step();
+  f.Find("##observed_player");
+  f.state["presentation"]["capabilities"]["select_player"]["requestable"] = false;
+  f.Step();
+  f.Click("##observed_player");
+  Require(f.commands.empty(), "Unavailable spectator adapter emitted a selection request");
 }
+
 }  // namespace
 
 int main() {
@@ -815,10 +748,8 @@ int main() {
     PlayerCosmetics();
     std::cout << "Presentation and separate camera-key controls\n" << std::flush;
     PresentationSelectors();
-    std::cout << "Owned weapon and compatible finish controls\n" << std::flush;
-    WeaponPaintControls();
-    std::cout << "Selected-player gloves and compatible finishes\n" << std::flush;
-    GloveControls();
+    std::cout << "Observed player selector and SteamID targeting\n" << std::flush;
+    ObservedPlayerSelector();
     std::cout << "Independent shortcuts panel\n" << std::flush;
     IndependentShortcutsPanel();
     std::cout << "PASS: numeric replacement, Enter/click-away, middle steps and bounds, "

@@ -54,19 +54,17 @@ def _demo_tick(value):
 
 
 def save_export_snapshot(client, directory):
-    """Persist a fresh project and active session appearance before any stop."""
+    """Persist a fresh project and session view before any stop."""
     client.request("preview", {"playing": False})
     state = client.request("get_state")
     playhead = {"demo_tick": _demo_tick(state["tick"])} if "tick" in state else {}
     project = client.request("export_project")
     project = json.loads(json.dumps(project, allow_nan=False))
+    # Preserve legacy requests in the recovery snapshot; validation below must
+    # reject them explicitly before closing the live session.
     appearance = state.get("appearance", {})
-    if appearance.get("active"):
-        if not appearance.get("mounted_verified") or not appearance.get("reload_requested"):
-            raise LiveError("Active appearance is not confirmed mounted/reloaded; inspect the scene before export")
-        project["appearance"] = {"path": appearance["path"], "models": list(appearance["models"])}
-    else:
-        project.pop("appearance", None)
+    if appearance.get("active") and "appearance" not in project:
+        project["appearance"] = {"path": appearance.get("path"), "models": appearance.get("models")}
     directory.mkdir(parents=True, mode=0o700, exist_ok=False)
     path = directory / "camera-project.json"
     with path.open("x") as handle:
@@ -77,8 +75,7 @@ def save_export_snapshot(client, directory):
         handle.flush()
         os.fsync(handle.fileno())
     return {"path": str(path), "project": project, "cursor": state.get("cursor", 0), **playhead,
-            "camera": state.get("camera"), "appearance": project.get("appearance"),
-            "appearance_render_verified": appearance.get("render_verified", False)}
+            "camera": state.get("camera"), "appearance": project.get("appearance")}
 
 
 def perform_export(options, *, demo, game_dir, client, stop_session, wait_session,
@@ -92,22 +89,20 @@ def perform_export(options, *, demo, game_dir, client, stop_session, wait_sessio
             raise RenderCancelled("Export cancelled")
     try:
         cancelled()
-        notify({"stage": "saving", "message": "Saving the camera project and current appearance"})
+        notify({"stage": "saving", "message": "Saving the camera project and current view"})
         directory = directory or state_root() / "exports" / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ-") + uuid.uuid4().hex[:8])
         snapshot = save_export_snapshot(client, directory)
         outcome["snapshot"] = snapshot
-        if snapshot.get("appearance") and not snapshot.get("appearance_render_verified"):
-            raise LiveError("Active appearance is experimental and has not been visually verified; reset appearance before export. Its pack reference was saved with the project.")
         describe_export(snapshot["project"], options)
         output = options.output.expanduser().absolute()
         if output.suffix.casefold() != ".mp4" or output.exists():
             raise ValueError("Choose a new .mp4 output file; existing files are never overwritten")
         output.parent.mkdir(parents=True, exist_ok=True)
         from .capture_environment import validate_environment
-        environment = validate_environment(snapshot["project"], allow_glove_capture=True)
+        environment = validate_environment(snapshot["project"])
         if environment.get("cosmetics"):
             from .camera_backend import verify_cosmetics_capture_support
-            verify_cosmetics_capture_support(require_gloves=bool(environment["cosmetics"].get("gloves")))
+            verify_cosmetics_capture_support()
         if render is None:
             from .discovery import validate_media_tools
             validate_media_tools()
@@ -171,10 +166,14 @@ def _restore_demo_playhead(client, tick, requested_view=None):
 def restore_export_snapshot(client, snapshot):
     demo_tick = _demo_tick(snapshot["demo_tick"]) if "demo_tick" in snapshot else None
     project = dict(snapshot["project"])
-    project.pop("appearance", None)  # Appearance is an explicit session adapter.
+    from .live_mcp import ProtocolError, reject_removed_cosmetics
+    try:
+        reject_removed_cosmetics(project)
+        if snapshot.get("appearance"):
+            reject_removed_cosmetics({"appearance":snapshot["appearance"]})
+    except ProtocolError as error:
+        raise LiveError(error.message) from error
     client.request("import_project", {"project": project})
-    if snapshot.get("appearance"):
-        client.request("apply_appearance_pack", snapshot["appearance"])
     # A fresh project has no sampled camera yet; its saved live camera is
     # restored below without asking the native track evaluator for a key.
     if project.get("keys"):
@@ -239,7 +238,7 @@ def create_export_dialog(parent, project, *, start_export):
             self.summary = QtWidgets.QLabel()
             self.summary.setWordWrap(True)
             form.addRow(self.summary)
-            info = QtWidgets.QLabel("Your project is saved first. The owned live session closes for capture, then the editor can reopen with the same project and appearance.")
+            info = QtWidgets.QLabel("Your project is saved first. The owned live session closes for capture, then the editor can reopen with the same project and view.")
             info.setWordWrap(True)
             form.addRow(info)
             self.progress = QtWidgets.QProgressBar()

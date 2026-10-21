@@ -26,6 +26,7 @@
 #include "editor_ui.h"
 #include "cosmetics_catalog.h"
 #include "overlay_blur.h"
+#include "overlay_platform.h"
 
 namespace camera_overlay {
 using Lookup=void*(*)(void*,const char*);
@@ -94,9 +95,13 @@ std::mutex events_mutex;
 struct InputEvent { SDL_Event event; std::string text; };
 std::deque<InputEvent> events;
 std::atomic<SDL_Window*> game_window{nullptr};
-std::atomic<bool> relative_requested{false},grab_requested{false},cursor_hidden_requested{false};
+std::atomic<SDL_WindowID> game_window_id{0},pending_window_id{0};
+std::atomic<int> logical_width{0},logical_height{0};
+std::atomic<bool> window_focused{false};
+std::atomic<std::uint64_t> mouse_button_events{0},mouse_button_delivered{0},foreign_mouse_button_events{0};
+std::atomic<int> relative_requested{-1},grab_requested{-1},cursor_visible_requested{-1};
 std::atomic<bool> filter_installed{false}, overlay_available{false};
-bool InputMode() { return shown.load() && filter_installed.load() && overlay_available.load(); }
+bool InputMode() { return shown.load() && filter_installed.load() && overlay_available.load() && game_window_id.load()!=0 && window_focused.load(); }
 SDL_EventFilter previous_filter=nullptr;
 void* previous_filter_data=nullptr;
 std::mutex filter_mutex;
@@ -107,6 +112,7 @@ StateFn state_fn=nullptr; CommandFn command_fn=nullptr;
 std::atomic<bool> bridge_ready{false};
 template<class T> T Sdl(const char* name);
 void CursorMode(bool capture);
+void MainThreadService();
 std::atomic<bool> text_input{false};
 // SDL promises a lifetime-stable keyboard array. Source 2 caches this pointer;
 // swapping arrays when opening the editor would leave roaming controls stuck.
@@ -115,7 +121,16 @@ bool keyboard_state[SDL_SCANCODE_COUNT]={};
 bool physical_keys[SDL_SCANCODE_COUNT]={};
 void KeyboardMode(bool capture) {
     std::lock_guard<std::mutex> lock(keyboard_mutex);
-    for(int i=0;i<SDL_SCANCODE_COUNT;++i)keyboard_state[i]=!capture && physical_keys[i];
+    cs2_camera_platform::KeyboardSnapshot(physical_keys,keyboard_state,nullptr,0,capture,window_focused.load());
+}
+void RefreshKeyboard(bool capture) {
+    // SDL_GetKeyboardState is documented thread-safe. MainThreadService calls
+    // this again after Pump/Poll so a cached engine pointer sees native changes
+    // even if no key event passed through our filter.
+    static auto real=Sdl<const bool*(*)(int*)>("SDL_GetKeyboardState");
+    int count=0;const bool* native=real?real(&count):nullptr;
+    std::lock_guard<std::mutex> lock(keyboard_mutex);
+    cs2_camera_platform::KeyboardSnapshot(physical_keys,keyboard_state,native,count,capture,window_focused.load());
 }
 struct Hotkey { std::string name; SDL_Scancode scan; SDL_Keymod modifiers; };
 std::unordered_map<std::string,Hotkey> hotkeys={
@@ -151,7 +166,7 @@ void LoadHotkeys() {
     if(!file)return;
     try {
         nlohmann::json data;file>>data;
-        auto scan_name=Sdl<SDL_Scancode(*)(const char*)>("SDL_GetScancodeFromName");
+        static auto scan_name=Sdl<SDL_Scancode(*)(const char*)>("SDL_GetScancodeFromName");
         if(!scan_name)return;
         for(auto& pair:hotkeys) {
             if(!data.contains(pair.first) || !data[pair.first].is_string())continue;
@@ -177,7 +192,8 @@ void Send(const char* method,const nlohmann::json& params=nlohmann::json::object
 }
 bool Shortcut(const SDL_KeyboardEvent& event) {
     if(event.repeat)return false;
-    if(Match(event,hotkeys.at("editor"))) {shown=!shown.load();KeyboardMode(InputMode());CursorMode(InputMode());return true;}
+    if(Match(event,hotkeys.at("editor"))) {shown=!shown.load();KeyboardMode(InputMode());return true;}
+    if(!Match(event,hotkeys.at("camera")) && !Match(event,hotkeys.at("preview")) && !Match(event,hotkeys.at("capture")))return false;
     if(text_input || !bridge_ready.load())return false;
     try {
         const auto state=nlohmann::json::parse(state_fn());
@@ -213,31 +229,31 @@ template<class T> T Sdl(const char* name) {
     return reinterpret_cast<T>(library ? RealSymbol(library,name) : nullptr);
 }
 void CursorMode(bool capture) {
-    static std::mutex cursor_mutex;
-    std::lock_guard<std::mutex> lock(cursor_mutex);
-    static bool held=false, previous_relative=false, previous_grab=false, previous_cursor=true, previous_text=false;
+    static auto is_main=Sdl<bool(*)()>("SDL_IsMainThread");if(!is_main || !is_main())return;
     auto window=game_window.load();
-    auto relative=Sdl<bool(*)(SDL_Window*,bool)>("SDL_SetWindowRelativeMouseMode");
-    auto grab=Sdl<bool(*)(SDL_Window*,bool)>("SDL_SetWindowMouseGrab");
-    auto show=Sdl<bool(*)()>("SDL_ShowCursor");
-    auto hide=Sdl<bool(*)()>("SDL_HideCursor");
-    if(capture && window) {
-        if(!held) {
-            auto get_relative=Sdl<bool(*)(SDL_Window*)>("SDL_GetWindowRelativeMouseMode");
-            auto get_grab=Sdl<bool(*)(SDL_Window*)>("SDL_GetWindowMouseGrab");
-            auto get_cursor=Sdl<bool(*)()>("SDL_CursorVisible");
-            auto get_text=Sdl<bool(*)(SDL_Window*)>("SDL_TextInputActive");
-            previous_relative=get_relative && get_relative(window);previous_grab=get_grab && get_grab(window);previous_cursor=!get_cursor || get_cursor();held=true;
-            previous_text=get_text && get_text(window);
-        }
-        if(relative)relative(window,false);if(grab)grab(window,false);if(show)show();
-        auto start_text=Sdl<bool(*)(SDL_Window*)>("SDL_StartTextInput");if(start_text)start_text(window);
-    }else if(held && window) {
-        if(relative)relative(window,relative_requested.load() || previous_relative);
-        if(grab)grab(window,grab_requested.load() || previous_grab);
-        if(previous_cursor && !cursor_hidden_requested){if(show)show();}else if(hide)hide();held=false;
-        auto stop_text=Sdl<bool(*)(SDL_Window*)>("SDL_StopTextInput");if(!previous_text && stop_text)stop_text(window);
-    }
+    static cs2_camera_platform::CursorCapture cursor;
+    static auto relative=Sdl<bool(*)(SDL_Window*,bool)>("SDL_SetWindowRelativeMouseMode");
+    static auto grab=Sdl<bool(*)(SDL_Window*,bool)>("SDL_SetWindowMouseGrab");
+    static auto show=Sdl<bool(*)()>("SDL_ShowCursor");
+    static auto hide=Sdl<bool(*)()>("SDL_HideCursor");
+    static auto get_relative=Sdl<bool(*)(SDL_Window*)>("SDL_GetWindowRelativeMouseMode");
+    static auto get_grab=Sdl<bool(*)(SDL_Window*)>("SDL_GetWindowMouseGrab");
+    static auto get_cursor=Sdl<bool(*)()>("SDL_CursorVisible");static auto get_text=Sdl<bool(*)(SDL_Window*)>("SDL_TextInputActive");
+    static auto start_text=Sdl<bool(*)(SDL_Window*)>("SDL_StartTextInput");static auto stop_text=Sdl<bool(*)(SDL_Window*)>("SDL_StopTextInput");
+    cs2_camera_platform::CursorCapture::Functions f;
+    f.relative=[&]{return get_relative && get_relative(window);};f.grab=[&]{return get_grab && get_grab(window);};f.visible=[&]{return !get_cursor || get_cursor();};f.text=[&]{return get_text && get_text(window);};
+    f.setRelative=[&](bool value){if(relative)relative(window,value);};f.setGrab=[&](bool value){if(grab)grab(window,value);};f.setVisible=[&](bool value){if(value){if(show)show();}else if(hide)hide();};f.setText=[&](bool value){if(value){if(start_text)start_text(window);}else if(stop_text)stop_text(window);};
+    cursor.Update(true,reinterpret_cast<std::uintptr_t>(window),capture,relative_requested.load(),grab_requested.load(),cursor_visible_requested.load(),f);
+}
+SDL_WindowID EventWindow(const SDL_Event& event) {
+    switch(event.type){
+    case SDL_EVENT_MOUSE_MOTION:return event.motion.windowID;
+    case SDL_EVENT_MOUSE_BUTTON_DOWN:case SDL_EVENT_MOUSE_BUTTON_UP:return event.button.windowID;
+    case SDL_EVENT_MOUSE_WHEEL:return event.wheel.windowID;
+    case SDL_EVENT_KEY_DOWN:case SDL_EVENT_KEY_UP:return event.key.windowID;
+    case SDL_EVENT_TEXT_INPUT:return event.text.windowID;
+    default:if(event.type>=SDL_EVENT_WINDOW_FIRST && event.type<=SDL_EVENT_WINDOW_LAST)return event.window.windowID;
+    }return 0;
 }
 bool SDLCALL Filter(void*, SDL_Event* event) {
     if (!event) return true;
@@ -246,26 +262,28 @@ bool SDLCALL Filter(void*, SDL_Event* event) {
     struct Guard { bool& value; Guard(bool& v):value(v){value=true;} ~Guard(){value=false;} } guard(filtering);
     const bool keyboard=event->type==SDL_EVENT_KEY_DOWN || event->type==SDL_EVENT_KEY_UP || event->type==SDL_EVENT_TEXT_INPUT;
     const bool mouse=event->type>=SDL_EVENT_MOUSE_MOTION && event->type<=SDL_EVENT_MOUSE_WHEEL;
-    if ((keyboard || mouse) && !game_window.load()) {
-        SDL_WindowID id=keyboard ? event->key.windowID : event->motion.windowID;
-        auto from_id=Sdl<SDL_Window*(*)(SDL_WindowID)>("SDL_GetWindowFromID");
-        if(from_id && id)game_window=from_id(id);
+    const auto id=EventWindow(*event);
+    if(id && !game_window_id.load())pending_window_id=id;
+    const bool own=cs2_camera_platform::OwnEvent(game_window_id.load(),id);
+    if(event->type==SDL_EVENT_MOUSE_BUTTON_DOWN || event->type==SDL_EVENT_MOUSE_BUTTON_UP){if(own)++mouse_button_events;else ++foreign_mouse_button_events;}
+    if(own && (event->type==SDL_EVENT_WINDOW_FOCUS_GAINED || event->type==SDL_EVENT_WINDOW_FOCUS_LOST)) {
+        window_focused=event->type==SDL_EVENT_WINDOW_FOCUS_GAINED;
+        if(!window_focused){std::lock_guard<std::mutex> lock(keyboard_mutex);std::fill(std::begin(physical_keys),std::end(physical_keys),false);std::fill(std::begin(keyboard_state),std::end(keyboard_state),false);}
     }
-    if(event->type==SDL_EVENT_KEY_DOWN || event->type==SDL_EVENT_KEY_UP) {
+    if(own && (event->type==SDL_EVENT_KEY_DOWN || event->type==SDL_EVENT_KEY_UP)) {
         const auto scan=event->key.scancode;
         if(scan>=0 && scan<SDL_SCANCODE_COUNT) {
             std::lock_guard<std::mutex> lock(keyboard_mutex);
             physical_keys[scan]=event->type==SDL_EVENT_KEY_DOWN;
-            keyboard_state[scan]=!InputMode() && physical_keys[scan];
+            keyboard_state[scan]=!InputMode() && window_focused.load() && physical_keys[scan];
         }
     }
-    if(event->type==SDL_EVENT_KEY_DOWN && Shortcut(event->key))return false;
-    if(keyboard || mouse) CursorMode(InputMode());
-    {
+    if(own && event->type==SDL_EVENT_KEY_DOWN && Shortcut(event->key))return false;
+    if(own) {
         std::lock_guard<std::mutex> lock(events_mutex);
         if(events.size()<2048)events.push_back({*event,event->type==SDL_EVENT_TEXT_INPUT && event->text.text ? event->text.text : ""});
     }
-    const bool consume=InputMode() && ((mouse && wants_mouse) || (keyboard && wants_keyboard));
+    const bool consume=own && InputMode() && ((mouse && wants_mouse) || (keyboard && wants_keyboard));
     // Releases must reach the engine even if their presses preceded F8.
     if(consume && event->type!=SDL_EVENT_KEY_UP && event->type!=SDL_EVENT_MOUSE_BUTTON_UP)return false;
     SDL_EventFilter next=nullptr;void* data=nullptr;
@@ -273,8 +291,8 @@ bool SDLCALL Filter(void*, SDL_Event* event) {
     return next ? next(data,event) : true;
 }
 void InstallFilter() {
-    auto set=Sdl<void(*)(SDL_EventFilter,void*)>("SDL_SetEventFilter");
-    auto get=Sdl<bool(*)(SDL_EventFilter*,void**)>("SDL_GetEventFilter");
+    static auto set=Sdl<void(*)(SDL_EventFilter,void*)>("SDL_SetEventFilter");
+    static auto get=Sdl<bool(*)(SDL_EventFilter*,void**)>("SDL_GetEventFilter");
     if(!set)return;
     SDL_EventFilter current=nullptr;void* data=nullptr;
     if(get)get(&current,&data);
@@ -287,12 +305,72 @@ void InstallFilter() {
 }
 void UninstallFilter() {
     if(!filter_installed)return;
-    auto set=Sdl<void(*)(SDL_EventFilter,void*)>("SDL_SetEventFilter");
+    static auto set=Sdl<void(*)(SDL_EventFilter,void*)>("SDL_SetEventFilter");
     SDL_EventFilter next=nullptr;void* data=nullptr;
     {std::lock_guard<std::mutex> lock(filter_mutex);next=previous_filter;data=previous_filter_data;}
     if(set)set(next,data);
     filter_installed=false;
 }
+void RememberWindow(SDL_Window* window) {
+    static auto is_main=Sdl<bool(*)()>("SDL_IsMainThread");
+    static auto get_id=Sdl<SDL_WindowID(*)(SDL_Window*)>("SDL_GetWindowID");
+    if(window && is_main && is_main() && get_id)pending_window_id=get_id(window);
+}
+void MainThreadService() {
+    static auto is_main=Sdl<bool(*)()>("SDL_IsMainThread");if(!is_main || !is_main())return;
+    static thread_local bool servicing=false;if(servicing)return;
+    struct Guard{bool& value;explicit Guard(bool& v):value(v){value=true;}~Guard(){value=false;}} guard(servicing);
+    try {
+        static auto from_id=Sdl<SDL_Window*(*)(SDL_WindowID)>("SDL_GetWindowFromID");
+        static auto get_id=Sdl<SDL_WindowID(*)(SDL_Window*)>("SDL_GetWindowID");
+        static auto flags=Sdl<SDL_WindowFlags(*)(SDL_Window*)>("SDL_GetWindowFlags");
+        if(!from_id || !get_id || !flags)return;
+        const auto vulkan=[&](SDL_Window* window){return window && (flags(window)&SDL_WINDOW_VULKAN)!=0;};
+        SDL_Window* window=game_window_id.load()?from_id(game_window_id.load()):nullptr;
+        if(!vulkan(window))window=nullptr;
+        if(!window && pending_window_id.load()){auto candidate=from_id(pending_window_id.load());if(vulkan(candidate))window=candidate;}
+        if(!window) {
+            static auto windows=Sdl<SDL_Window**(*)(int*)>("SDL_GetWindows");static auto release=Sdl<void(*)(void*)>("SDL_free");
+            if(windows && release){int count=0;auto list=windows(&count);unsigned matches=0;
+                if(list && count>=0 && count<=64)for(int i=0;i<count;++i)if(vulkan(list[i])){window=list[i];++matches;}
+                if(matches!=1)window=nullptr;
+                if(list)release(list);
+            }
+        }
+        const auto previous=game_window.load();const auto id=window?get_id(window):0;
+        game_window=window;game_window_id=id;
+        if(previous!=window){
+            {std::lock_guard<std::mutex> lock(events_mutex);events.clear();if(id){SDL_Event reset{};reset.type=SDL_EVENT_WINDOW_FOCUS_LOST;reset.window.windowID=id;events.push_back({reset,{}});}}
+            {std::lock_guard<std::mutex> lock(keyboard_mutex);std::fill(std::begin(physical_keys),std::end(physical_keys),false);std::fill(std::begin(keyboard_state),std::end(keyboard_state),false);}
+            relative_requested=-1;grab_requested=-1;cursor_visible_requested=-1;
+        }
+        int width=0,height=0;static auto size=Sdl<bool(*)(SDL_Window*,int*,int*)>("SDL_GetWindowSize");
+        if(window && size && !size(window,&width,&height))width=height=0;
+        logical_width=width;logical_height=height;
+        const auto current_flags=window?flags(window):SDL_WindowFlags(0);
+        window_focused=window && (current_flags&SDL_WINDOW_INPUT_FOCUS)!=0;
+        if(overlay_available.load())InstallFilter();
+        CursorMode(InputMode());RefreshKeyboard(InputMode());
+        static cs2_camera_platform::DesktopFullscreen fullscreen;
+        static const bool requested=[] {const char* value=std::getenv("CS2_CAMERA_FULLSCREEN_WINDOWED");return value && std::strcmp(value,"1")==0;}();
+        fullscreen.Requested(requested);
+        static auto desktop=Sdl<bool(*)(SDL_Window*,const SDL_DisplayMode*)>("SDL_SetWindowFullscreenMode");
+        static auto set_fullscreen=Sdl<bool(*)(SDL_Window*,bool)>("SDL_SetWindowFullscreen");
+        static auto fullscreen_mode=Sdl<const SDL_DisplayMode*(*)(SDL_Window*)>("SDL_GetWindowFullscreenMode");
+        const bool desktop_fullscreen=window && (current_flags&SDL_WINDOW_FULLSCREEN) && fullscreen_mode && fullscreen_mode(window)==nullptr;
+        fullscreen.Update(true,reinterpret_cast<std::uintptr_t>(window),id,bool(window),desktop_fullscreen,
+            std::chrono::steady_clock::now(),[&]{return desktop && desktop(window,nullptr);},[&]{return set_fullscreen && set_fullscreen(window,true);});
+        static std::string previous_diagnostic;
+        const auto diagnostic=std::to_string(id)+":"+std::to_string(width)+":"+std::to_string(height)+":"+std::to_string(window_focused.load())+":"+std::to_string(InputMode())+":"+fullscreen.Name()+":"+std::to_string(fullscreen.Attempts());
+        if(diagnostic!=previous_diagnostic){
+            previous_diagnostic=diagnostic;
+            static auto get_relative=Sdl<bool(*)(SDL_Window*)>("SDL_GetWindowRelativeMouseMode");static auto get_grab=Sdl<bool(*)(SDL_Window*)>("SDL_GetWindowMouseGrab");static auto visible=Sdl<bool(*)()>("SDL_CursorVisible");
+            Log("SDL window id=%u logical=%dx%d focused=%d input_available=%d editor_input=%d relative=%d mouse_grab=%d cursor_visible=%d fullscreen=%s attempts=%u",unsigned(id),width,height,int(window_focused.load()),int(id && width>0 && height>0 && filter_installed.load()),int(InputMode()),window && get_relative?int(get_relative(window)):-1,window && get_grab?int(get_grab(window)):-1,visible?int(visible()):-1,fullscreen.Name(),fullscreen.Attempts());
+        }
+    }catch(const std::exception& error){Log("SDL main-thread service: %s",error.what());}
+    catch(...){Log("SDL main-thread service failed");}
+}
+using EventDispatch=cs2_camera_platform::EventDispatch;
 ImGuiKey MapKey(SDL_Scancode code) {
     if(code>=SDL_SCANCODE_A && code<=SDL_SCANCODE_Z)return ImGuiKey(ImGuiKey_A+code-SDL_SCANCODE_A);
     if(code>=SDL_SCANCODE_1 && code<=SDL_SCANCODE_9)return ImGuiKey(ImGuiKey_1+code-SDL_SCANCODE_1);
@@ -317,19 +395,22 @@ ImGuiKey MapKey(SDL_Scancode code) {
     default:return ImGuiKey_None;
     }
 }
-void Input(ImGuiIO& io) {
+void Input(ImGuiIO& io,unsigned framebuffer_width,unsigned framebuffer_height) {
     std::deque<InputEvent> pending;
     {std::lock_guard<std::mutex> lock(events_mutex);pending.swap(events);}
     for(const auto& item:pending) {
         const auto& event=item.event;
+        if(!cs2_camera_platform::OwnEvent(game_window_id.load(),EventWindow(event)))continue;
+        const auto position=[&](float x,float y){const auto p=cs2_camera_platform::Pointer(game_window_id.load(),EventWindow(event),logical_width.load(),logical_height.load(),framebuffer_width,framebuffer_height,x,y);if(p)io.AddMousePosEvent(p->x,p->y);return bool(p);};
         switch(event.type) {
-        case SDL_EVENT_MOUSE_MOTION: io.AddMousePosEvent(event.motion.x,event.motion.y);break;
+        case SDL_EVENT_MOUSE_MOTION: position(event.motion.x,event.motion.y);break;
         case SDL_EVENT_MOUSE_BUTTON_DOWN: case SDL_EVENT_MOUSE_BUTTON_UP: {
             int button=-1;
             if(event.button.button==SDL_BUTTON_LEFT)button=0;
             if(event.button.button==SDL_BUTTON_RIGHT)button=1;
             if(event.button.button==SDL_BUTTON_MIDDLE)button=2;
-            if(button>=0)io.AddMouseButtonEvent(button,event.type==SDL_EVENT_MOUSE_BUTTON_DOWN);
+            const auto p=cs2_camera_platform::Pointer(game_window_id.load(),EventWindow(event),logical_width.load(),logical_height.load(),framebuffer_width,framebuffer_height,event.button.x,event.button.y);
+            if(button>=0)cs2_camera_platform::PointerButton(p,event.type==SDL_EVENT_MOUSE_BUTTON_DOWN,[&](const cs2_camera_platform::Point& value){io.AddMousePosEvent(value.x,value.y);},[&](bool down){io.AddMouseButtonEvent(button,down);++mouse_button_delivered;});
             break;
         }
         case SDL_EVENT_MOUSE_WHEEL: io.AddMouseWheelEvent(event.wheel.x,event.wheel.y);break;
@@ -360,7 +441,6 @@ int FindBridge(dl_phdr_info* info,size_t,void*) {
 }
 bool Draw(Swapchain& s,uint32_t image_index) {
     const bool frame_shown=shown.load();
-    InstallFilter();
     if(!bridge_ready.load())dl_iterate_phdr(FindBridge,nullptr);
     auto& io=ImGui::GetIO();
     io.DisplaySize=ImVec2(float(s.extent.width),float(s.extent.height));
@@ -369,7 +449,13 @@ bool Draw(Swapchain& s,uint32_t image_index) {
     io.DeltaTime=previous_frame.time_since_epoch().count() ? std::chrono::duration<float>(now-previous_frame).count() : 1.f/60.f;
     if(io.DeltaTime<=0 || io.DeltaTime>1)io.DeltaTime=1.f/60.f;
     previous_frame=now;
-    Input(io);
+    Input(io,s.extent.width,s.extent.height);
+    io.AddFocusEvent(window_focused.load());
+    static std::string previous_input_dimensions;
+    const auto dimensions=std::to_string(game_window_id.load())+":"+std::to_string(logical_width.load())+":"+std::to_string(logical_height.load())+":"+std::to_string(s.extent.width)+":"+std::to_string(s.extent.height);
+    if(dimensions!=previous_input_dimensions){previous_input_dimensions=dimensions;Log("SDL input mapping window_id=%u logical=%dx%d framebuffer=%ux%u",unsigned(game_window_id.load()),logical_width.load(),logical_height.load(),s.extent.width,s.extent.height);}
+    static std::uint64_t previous_buttons=0;
+    const auto buttons=mouse_button_events.load();if(buttons!=previous_buttons){previous_buttons=buttons;Log("SDL mouse buttons window_id=%u observed=%llu queued_for_imgui=%llu foreign=%llu focused=%d",unsigned(game_window_id.load()),static_cast<unsigned long long>(buttons),static_cast<unsigned long long>(mouse_button_delivered.load()),static_cast<unsigned long long>(foreign_mouse_button_events.load()),int(window_focused.load()));}
     ImGui_ImplVulkan_NewFrame(); ImGui::NewFrame();
     nlohmann::json state={{"connected",false},{"demo",false},{"tick",0},{"tick_rate",64},{"paused",true},{"mode","free"},
       {"camera",{{"position",{0,0,0}},{"angles",{0,0,0}},{"fov",90}}},
@@ -394,7 +480,7 @@ bool Draw(Swapchain& s,uint32_t image_index) {
     wants_mouse=shown.load();
     wants_keyboard=shown.load();
     text_input=shown && (io.WantTextInput || ImGui::IsAnyItemActive());
-    io.MouseDrawCursor=shown;
+    io.MouseDrawCursor=false; // The main-thread service keeps the native cursor visible.
     ImGui::Render();
     if(s.format==VK_FORMAT_B8G8R8A8_SRGB || s.format==VK_FORMAT_R8G8B8A8_SRGB || s.format==VK_FORMAT_A8B8G8R8_SRGB_PACK32) {
         static const auto linear=[] {std::array<ImU32,256> table{};for(int i=0;i<256;++i) {
@@ -632,50 +718,57 @@ PFN_vkVoidFunction Intercept(const char* name) {
 } // namespace camera_overlay
 
 extern "C" {
+__attribute__((visibility("default"))) bool SDLCALL SDL_PollEvent(SDL_Event* event) {
+    static auto real=camera_overlay::Sdl<bool(*)(SDL_Event*)>("SDL_PollEvent");
+    camera_overlay::EventDispatch dispatch(camera_overlay::MainThreadService);return real && real(event);
+}
+__attribute__((visibility("default"))) void SDLCALL SDL_PumpEvents() {
+    static auto real=camera_overlay::Sdl<void(*)()>("SDL_PumpEvents");
+    camera_overlay::EventDispatch dispatch(camera_overlay::MainThreadService);if(real)real();
+}
 __attribute__((visibility("default"))) bool SDLCALL SDL_SetWindowRelativeMouseMode(SDL_Window* window,bool enabled) {
-    camera_overlay::game_window=window;
-    camera_overlay::relative_requested=enabled;
-    auto real=camera_overlay::Sdl<bool(*)(SDL_Window*,bool)>("SDL_SetWindowRelativeMouseMode");
-    return real && real(window,camera_overlay::InputMode()?false:enabled);
+    camera_overlay::RememberWindow(window);
+    const bool own=window && window==camera_overlay::game_window.load();
+    if(own)camera_overlay::relative_requested=enabled?1:0;
+    static auto real=camera_overlay::Sdl<bool(*)(SDL_Window*,bool)>("SDL_SetWindowRelativeMouseMode");
+    return real && real(window,own && camera_overlay::InputMode()?false:enabled);
 }
 __attribute__((visibility("default"))) bool SDLCALL SDL_SetWindowMouseGrab(SDL_Window* window,bool enabled) {
-    camera_overlay::game_window=window;
-    camera_overlay::grab_requested=enabled;
-    auto real=camera_overlay::Sdl<bool(*)(SDL_Window*,bool)>("SDL_SetWindowMouseGrab");
-    return real && real(window,camera_overlay::InputMode()?false:enabled);
+    camera_overlay::RememberWindow(window);
+    const bool own=window && window==camera_overlay::game_window.load();
+    if(own)camera_overlay::grab_requested=enabled?1:0;
+    static auto real=camera_overlay::Sdl<bool(*)(SDL_Window*,bool)>("SDL_SetWindowMouseGrab");
+    return real && real(window,own && camera_overlay::InputMode()?false:enabled);
 }
 __attribute__((visibility("default"))) bool SDLCALL SDL_HideCursor() {
-    camera_overlay::cursor_hidden_requested=true;
-    auto real=camera_overlay::Sdl<bool(*)()>(camera_overlay::InputMode()?"SDL_ShowCursor":"SDL_HideCursor");
-    return real && real();
+    camera_overlay::cursor_visible_requested=0;
+    static auto show=camera_overlay::Sdl<bool(*)()>("SDL_ShowCursor");
+    static auto hide=camera_overlay::Sdl<bool(*)()>("SDL_HideCursor");
+    const auto real=camera_overlay::InputMode()?show:hide;return real && real();
+}
+__attribute__((visibility("default"))) bool SDLCALL SDL_ShowCursor() {
+    camera_overlay::cursor_visible_requested=1;
+    static auto real=camera_overlay::Sdl<bool(*)()>("SDL_ShowCursor");return real && real();
 }
 __attribute__((visibility("default"))) void SDLCALL SDL_WarpMouseInWindow(SDL_Window* window,float x,float y) {
-    if(camera_overlay::InputMode())return;
-    auto real=camera_overlay::Sdl<void(*)(SDL_Window*,float,float)>("SDL_WarpMouseInWindow");if(real)real(window,x,y);
+    if(window==camera_overlay::game_window.load() && camera_overlay::InputMode())return;
+    static auto real=camera_overlay::Sdl<void(*)(SDL_Window*,float,float)>("SDL_WarpMouseInWindow");if(real)real(window,x,y);
 }
 __attribute__((visibility("default"))) bool SDLCALL SDL_WarpMouseGlobal(float x,float y) {
     if(camera_overlay::InputMode())return true;
-    auto real=camera_overlay::Sdl<bool(*)(float,float)>("SDL_WarpMouseGlobal");return real && real(x,y);
+    static auto real=camera_overlay::Sdl<bool(*)(float,float)>("SDL_WarpMouseGlobal");return real && real(x,y);
 }
 __attribute__((visibility("default"))) SDL_MouseButtonFlags SDLCALL SDL_GetRelativeMouseState(float* x,float* y) {
-    auto real=camera_overlay::Sdl<SDL_MouseButtonFlags(*)(float*,float*)>("SDL_GetRelativeMouseState");
+    static auto real=camera_overlay::Sdl<SDL_MouseButtonFlags(*)(float*,float*)>("SDL_GetRelativeMouseState");
     auto flags=real?real(x,y):0;
     if(camera_overlay::InputMode()){if(x)*x=0;if(y)*y=0;return 0;}return flags;
 }
 __attribute__((visibility("default"))) SDL_MouseButtonFlags SDLCALL SDL_GetMouseState(float* x,float* y) {
-    auto real=camera_overlay::Sdl<SDL_MouseButtonFlags(*)(float*,float*)>("SDL_GetMouseState");
+    static auto real=camera_overlay::Sdl<SDL_MouseButtonFlags(*)(float*,float*)>("SDL_GetMouseState");
     auto flags=real?real(x,y):0;return camera_overlay::InputMode()?0:flags;
 }
 __attribute__((visibility("default"))) const bool* SDLCALL SDL_GetKeyboardState(int* count) {
-    auto real=camera_overlay::Sdl<const bool*(*)(int*)>("SDL_GetKeyboardState");
-    int size=0;const bool* state=real?real(&size):nullptr;
-    {
-        std::lock_guard<std::mutex> lock(camera_overlay::keyboard_mutex);
-        if(state)for(int i=0;i<std::min(size,int(SDL_SCANCODE_COUNT));++i)
-            camera_overlay::physical_keys[i]=state[i];
-        for(int i=0;i<SDL_SCANCODE_COUNT;++i)
-            camera_overlay::keyboard_state[i]=!camera_overlay::InputMode() && camera_overlay::physical_keys[i];
-    }
+    camera_overlay::RefreshKeyboard(camera_overlay::InputMode());
     if(count)*count=SDL_SCANCODE_COUNT;
     return camera_overlay::keyboard_state;
 }
@@ -689,8 +782,9 @@ __attribute__((visibility("hidden"))) void* camera_dlsym_override(void* library,
     const char* live=std::getenv("CS2_CAMERA_LIVE");
     if(live && std::strcmp(live,"1")==0) {
 #define SDL_INTERCEPT(fn) if(std::strcmp(name,#fn)==0)return reinterpret_cast<void*>(fn);
+        SDL_INTERCEPT(SDL_PollEvent) SDL_INTERCEPT(SDL_PumpEvents)
         SDL_INTERCEPT(SDL_SetWindowRelativeMouseMode) SDL_INTERCEPT(SDL_SetWindowMouseGrab)
-        SDL_INTERCEPT(SDL_HideCursor) SDL_INTERCEPT(SDL_WarpMouseInWindow)
+        SDL_INTERCEPT(SDL_HideCursor) SDL_INTERCEPT(SDL_ShowCursor) SDL_INTERCEPT(SDL_WarpMouseInWindow)
         SDL_INTERCEPT(SDL_WarpMouseGlobal) SDL_INTERCEPT(SDL_GetRelativeMouseState)
         SDL_INTERCEPT(SDL_GetMouseState) SDL_INTERCEPT(SDL_GetKeyboardState)
 #undef SDL_INTERCEPT

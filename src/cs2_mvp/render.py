@@ -555,7 +555,7 @@ def render_clip(demo: Path, player: str | None, start: int | None = None, end: i
         raise ValueError("Camera JSON must contain an object")
     live_project = isinstance(camera_spec, dict) and "type" not in camera_spec and "keys" in camera_spec
     from .capture_environment import validate_environment
-    capture_environment = validate_environment(camera_spec or {}, allow_glove_capture=True)
+    capture_environment = validate_environment(camera_spec or {})
     range_metadata = None
     if live_project:
         from .live_track import select_render_range
@@ -677,7 +677,7 @@ def render_clip(demo: Path, player: str | None, start: int | None = None, end: i
             if capture_environment.get("cosmetics"):
                 from .camera_backend import verify_cosmetics_capture_support
                 from .cosmetics_catalog import stage_catalog
-                verify_cosmetics_capture_support(plugin, require_gloves=bool(capture_environment["cosmetics"].get("gloves")))
+                verify_cosmetics_capture_support(plugin)
                 catalog_path = stage_catalog(game, run / "cosmetics-catalog.json")
                 plan["cosmetics_catalog_sha256"] = sha256(catalog_path)
             plan["loaded_plugin_sha256"] = sha256(plugin)

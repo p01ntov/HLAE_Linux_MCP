@@ -1,7 +1,6 @@
 #pragma once
 #include <cstring>
 #include "scene_environment.h"
-#include "appearance_runtime.h"
 #include "capture_cosmetics.h"
 
 namespace cs2_mvp {
@@ -13,8 +12,7 @@ public:
     void BindScene(cs2_live::SceneEnvironment::Read read,cs2_live::SceneEnvironment::Write write) {
         scene_.Bind(std::move(read),std::move(write));
     }
-    void BindAppearance(cs2_live::AppearancePack::Callbacks callbacks) {appearance_.Bind(std::move(callbacks));}
-    void BindCosmetics(cs2_live::PlayerCosmetics::Callbacks players,cs2_live::WeaponCosmetics::Callbacks weapons,cs2_live::GloveCosmetics::Callbacks gloves={}) {cosmetics_.Bind(std::move(players),std::move(weapons),std::move(gloves));}
+    void BindCosmetics(cs2_live::PlayerCosmetics::Callbacks players) {cosmetics_.Bind(std::move(players));}
     void Frame(int tick,bool recording,const Log& log) {cosmetics_.Frame(tick,recording,log);}
     void BeforeMovie(int tick,const Log& log) {cosmetics_.BeforeMovie(tick,log);}
     static bool IsAction(const std::string& command) {
@@ -43,25 +41,20 @@ public:
             for(auto entry=settings.begin();entry!=settings.end();++entry)actual[entry.key()]=capabilities.at(entry.key()).at("value");
             if(log)log("CS2_MVP_SCENE_APPLIED tick="+std::to_string(tick)+" settings="+actual.dump());
         } else if(command.rfind(appearance,0)==0) {
-            if(cosmetics_.Active())throw std::invalid_argument("a global appearance pack cannot be combined with per-player cosmetics");
-            appearance_.Apply(Decode(command.substr(std::strlen(appearance))));
-            if(log)log("CS2_MVP_APPEARANCE_APPLIED tick="+std::to_string(tick)+" state="+appearance_.State().dump());
+            throw std::invalid_argument("global appearance packs are disabled in this build");
         } else if(command.rfind(cosmetics,0)==0) {
-            if(appearance_.State().value("active",false))throw std::invalid_argument("per-player cosmetics cannot be combined with a global appearance pack");
             cosmetics_.Apply(Decode(command.substr(std::strlen(cosmetics))));
         } else throw std::invalid_argument("unknown internal environment action");
     }
     void Restore(int tick,const std::string& reason,const Log& log) {
         std::string error;
         try {scene_.Apply(Json::object());}catch(const std::exception& exception){error=exception.what();}
-        try {appearance_.Reset();}catch(const std::exception& exception){if(!error.empty())error+="; ";error+=exception.what();}
         try {cosmetics_.Restore(tick,log);}catch(const std::exception& exception){if(!error.empty())error+="; ";error+=exception.what();}
         if(!error.empty())throw std::runtime_error(error);
         if(log)log("CS2_MVP_ENVIRONMENT_RESTORED tick="+std::to_string(tick)+" reason="+reason);
     }
 private:
     cs2_live::SceneEnvironment scene_;
-    cs2_live::AppearancePack appearance_;
     CaptureCosmetics cosmetics_;
 };
 } // namespace cs2_mvp

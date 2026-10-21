@@ -24,7 +24,7 @@ DEPENDENCIES = {
 HERE = Path(__file__).resolve().parent
 RELATIVE = Path("cs2-server-plugin/cs2-server-plugin")
 BUILD_FLAGS = (
-    "-std=c++17", "-Wall", "-Wno-switch", "-shared", "-fPIC",
+    "-std=c++17", "-O2", "-Wall", "-Wno-switch", "-shared", "-fPIC",
     "-fvisibility=hidden", "-fvisibility-inlines-hidden", "-fno-gnu-unique",
     "-Wl,-Bsymbolic-functions", "-Wl,--version-script=capture_exports.map",
     "-DPOSIX=1", "-DNO_MALLOC_OVERRIDE=1", "-DCOMPILER_GCC=1",
@@ -34,11 +34,9 @@ BUILD_FLAGS = (
 SOURCES = (
     HERE / "motion_track.h", HERE / "linux_view_patch.h",
     HERE / "capture_environment.h", HERE / "capture_cosmetics.h", HERE / "capture_exports.map",
-    HERE / "live/scene_environment.h", HERE / "live/appearance_pack.h",
-    HERE / "live/appearance_runtime.h", HERE / "live/compat_math.cpp",
+    HERE / "live/scene_environment.h", HERE / "live/compat_math.cpp",
     HERE / "live/team_palette.h", HERE / "live/cosmetics_catalog.h",
-    HERE / "live/player_cosmetics.h", HERE / "live/cosmetics_runtime.h", HERE / "live/weapon_cosmetics.h",
-    HERE / "live/glove_cosmetics.h", HERE / "live/glove_pose.h", HERE / "live/glove_render_phase.h",
+    HERE / "live/player_cosmetics.h", HERE / "live/cosmetics_runtime.h", HERE / "live/live_telemetry.h", HERE / "live/observer_player.h",
 )
 
 

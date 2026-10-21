@@ -29,10 +29,9 @@ MAX_MESSAGE = 1024 * 1024
 LIVE_METHODS = frozenset({"get_state", "set_camera", "release_camera", "add_key", "update_key",
                           "remove_key", "set_project", "scrub", "preview", "demo_control",
                           "apply_preset", "undo", "redo", "export_project", "import_project", "set_scene", "reset_scene",
-                          "apply_appearance_pack", "reset_appearance", "probe_appearance_pack", "request_export", "inspect_entities",
+                          "request_export", "inspect_entities",
                           "set_player_cosmetics", "reset_player_cosmetics", "set_team_palette", "reset_team_palette",
-                          "set_presentation", "set_player_weapon_paint", "reset_player_weapon_paint",
-                          "set_player_gloves", "reset_player_gloves"})
+                          "set_presentation", "select_player"})
 
 
 class LiveError(RuntimeError):
@@ -176,7 +175,7 @@ class NativeClient:
             raise LiveError("Camera request exceeds 1 MiB")
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-                connection.settimeout(max(self.timeout, 35) if method in {"apply_appearance_pack", "reset_appearance", "probe_appearance_pack"} else self.timeout)
+                connection.settimeout(self.timeout)
                 connection.connect(path)
                 if hasattr(socket, "SO_PEERCRED"):
                     _, peer_uid, _ = struct.unpack("3i", connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
@@ -239,7 +238,9 @@ def desktop_size() -> tuple[int, int] | None:
 
 def launch_arguments(runtime: Path, game: Path, demo_link: Path, run: Path,
                      *, windowed: bool = False, screen_size: tuple[int, int] | None = None) -> list[str]:
-    # Source's -sw plus desktop dimensions implements Fullscreen Windowed.
+    # Start windowed; the overlay requests SDL's borderless desktop fullscreen
+    # on the window's owner thread. Desktop-sized -noborder alone leaves KDE
+    # panels above the game because it does not set the fullscreen state.
     size = (1280, 720) if windowed else screen_size or desktop_size()
     video = ["-sw"] if windowed else ["-sw", "-noborder"]
     if size:
@@ -395,7 +396,8 @@ def _stop_owned(process: subprocess.Popen, demo_link: Path, tracker: OwnedProces
 def run_session(demo: Path, *, game_dir: str | None = None, plugin: Path | None = None,
                 overlay: Path | None = None, headless: bool = False,
                 stop: threading.Event | None = None, notify=None, windowed: bool = False,
-                screen_size: tuple[int, int] | None = None, on_ready=None) -> dict:
+                screen_size: tuple[int, int] | None = None, screen_name: str | None = None,
+                on_ready=None) -> dict:
     from .csdm import temporary_plugin
     from .discovery import find_game, find_runtime, process_ids, sha256
     from .render import config_backup
@@ -443,9 +445,12 @@ def run_session(demo: Path, *, game_dir: str | None = None, plugin: Path | None 
         environment.update(staged_cosmetics_environment(game, run, notify))
         environment.update({"SteamAppId": "730", "SteamGameId": "730", "USRLOCALCSGO": str(profile),
                             "CS2_CAMERA_LIVE": "1", "CS2_CAMERA_SOCKET": str(socket_path),
+                            "CS2_CAMERA_FULLSCREEN_WINDOWED": "0" if windowed else "1",
                             "CS2_CAMERA_DEMO_PATH": str(demo_link),
                             "CS2_CAMERA_PROJECT": str(projects / "last-project.json"),
                             "CS2_CAMERA_HOTKEYS": str(hotkey_configuration())})
+        if screen_name:
+            environment["SDL_VIDEO_DISPLAY_PRIORITY"] = screen_name
         if overlay:
             for variable in ("CS2_CAMERA_GAME_FONT", "CS2_CAMERA_MONO_FONT"):
                 environment.pop(variable, None)
@@ -781,6 +786,7 @@ def graphical_launcher(args) -> int:
         demo_path, game_path = Path(demo_edit.text()), game_edit.text().strip() or None
         windowed = not fullscreen.isChecked()
         screen = window.screen() or app.primaryScreen()
+        screen_name = screen.name() if screen else None
         screen_size = None
         if screen:
             scale = screen.devicePixelRatio()
@@ -791,10 +797,11 @@ def graphical_launcher(args) -> int:
             try:
                 def ready(client):
                     if resume:
-                        events.put(("status", (current_generation, "Restoring the saved camera project and appearance…")))
+                        events.put(("status", (current_generation, "Restoring the saved camera project…")))
                         restore_export_snapshot(client, resume)
                 result = run_session(demo_path, game_dir=game_path, plugin=args.plugin, overlay=args.overlay,
                                      headless=args.headless, stop=stop_event, windowed=windowed, screen_size=screen_size,
+                                     screen_name=screen_name,
                                      on_ready=ready, notify=lambda message: events.put(("status", (current_generation, message))))
                 result_holder["result"] = result
                 events.put(("done", (current_generation, result)))

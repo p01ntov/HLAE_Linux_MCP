@@ -94,7 +94,7 @@ class ExportTests(unittest.TestCase):
             self.assertEqual(order, ["stop", "restored", "render"])
             self.assertEqual(oct((root / "saved/camera-project.json").stat().st_mode & 0o777), "0o600")
 
-    def test_invalid_output_or_unverified_appearance_keeps_live_session_open(self):
+    def test_invalid_output_or_removed_appearance_keeps_live_session_open(self):
         with tempfile.TemporaryDirectory() as directory:
             root, client, stops = Path(directory), Client(), []
             existing = root / "existing.mp4"
@@ -108,7 +108,7 @@ class ExportTests(unittest.TestCase):
             outcome = perform_export(ExportOptions(root / "new.mp4"), demo="match.dem", game_dir=None, client=client,
                                      stop_session=lambda: stops.append(True), wait_session=lambda: None,
                                      render=lambda *a,**kw: self.fail("No capture"), directory=root / "second")
-            self.assertIn("experimental", outcome["error"])
+            self.assertIn("appearance packs are not supported", outcome["error"])
             self.assertEqual(stops, [])
             self.assertEqual(outcome["snapshot"]["appearance"]["path"], "/private/pack")
 
@@ -150,7 +150,7 @@ class ExportTests(unittest.TestCase):
             self.assertEqual(stops,[])
             self.assertEqual(outcome["snapshot"]["project"]["presentation"],presentation)
 
-    def test_unverified_glove_capture_preserves_saved_request_and_live_session(self):
+    def test_removed_glove_capture_preserves_saved_request_and_live_session(self):
         with tempfile.TemporaryDirectory() as directory:
             root,client,stops=Path(directory),Client(),[]
             cosmetics={"gloves":[{"steam_id":"76561198000000000","item_def":5030,"paint_kit":10006}]}
@@ -159,21 +159,25 @@ class ExportTests(unittest.TestCase):
                 outcome=perform_export(ExportOptions(root/"new.mp4"),demo="match.dem",game_dir=None,client=client,
                     stop_session=lambda:stops.append(True),wait_session=lambda:None,
                     render=lambda *a,**kw:self.fail("Gloves must fail before capture"),directory=root/"saved")
-            support.assert_called_once_with(require_gloves=True)
-            self.assertIn("glove pose and render publication",outcome["error"])
+            support.assert_not_called()
+            self.assertIn("cosmetics.gloves is not supported",outcome["error"])
             self.assertEqual(stops,[])
             self.assertEqual(outcome["snapshot"]["project"]["cosmetics"],cosmetics)
             self.assertEqual(json.loads(Path(outcome["snapshot"]["path"]).read_text())["cosmetics"],cosmetics)
 
-    def test_reopen_restores_project_scene_and_appearance_as_explicit_session_adapter(self):
-        client = Client()
-        project = {**PROJECT, "scene": {"hud_visible":False}, "appearance": {"path":"/private/pack","models":["agents/models/a.vmdl"]}}
-        snapshot = {"project":project,"appearance":project["appearance"],"cursor":.05,"camera":{"fov":80}}
-        restore_export_snapshot(client,snapshot)
-        self.assertEqual([method for method,_ in client.calls], ["import_project","apply_appearance_pack","scrub","set_camera"])
-        self.assertNotIn("appearance",client.calls[0][1]["project"])
+    def test_reopen_restores_supported_scene_but_rejects_legacy_appearance(self):
+        client=Client()
+        project={**PROJECT,"scene":{"hud_visible":False}}
+        restore_export_snapshot(client,{"project":project,"cursor":.05,"camera":{"fov":80}})
+        self.assertEqual([method for method,_ in client.calls],["import_project","scrub","set_camera"])
         self.assertEqual(client.calls[0][1]["project"]["scene"],{"hud_visible":False})
-        self.assertEqual(client.calls[2], ("scrub", {"time":.05,"seek_demo":True}))
+        self.assertEqual(client.calls[1],("scrub",{"time":.05,"seek_demo":True}))
+        client.calls.clear()
+        for snapshot in ({"project":{**project,"appearance":{}}},
+                         {"project":project,"appearance":{"path":"/private/pack","models":["agents/models/a.vmdl"]}}):
+            with self.subTest(snapshot=snapshot),self.assertRaisesRegex(RuntimeError,"not supported"):
+                restore_export_snapshot(client,snapshot)
+        self.assertEqual(client.calls,[])
 
     def test_snapshot_reopens_actual_demo_tick_independently_of_camera_cursor(self):
         with tempfile.TemporaryDirectory() as directory:

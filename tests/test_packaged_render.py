@@ -71,7 +71,7 @@ class BundledCaptureTests(unittest.TestCase):
                    "VK_INSTANCE_LAYERS":"VK_LAYER_CS2_camera:VK_LAYER_USER_overlay", "CS2_CAMERA_LIVE":"1",
                    "CS2_CAMERA_SOCKET":"/session/control.sock", "CS2_CAMERA_OVERLAY":"1", "CS2_CAMERA_PROJECT":"/session/project.json",
                    "CS2_CAMERA_COSMETICS_CATALOG":"/session/catalog.json", "CS2_CAMERA_COSMETICS_CATALOG_ERROR":"old error",
-                   "CS2_CAMERA_CAPTURE_COSMETICS":"1"}
+                   "CS2_CAMERA_CAPTURE_COSMETICS":"1", "CS2_CAMERA_FULLSCREEN_WINDOWED":"1"}
         with patch.object(sys,"frozen",False,create=True),patch.dict(os.environ,inherited,clear=True):
             environment=discovery.external_environment()
         self.assertEqual(environment["LD_LIBRARY_PATH"],"/host/lib")

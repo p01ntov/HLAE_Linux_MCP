@@ -13,13 +13,6 @@ class CameraBackendTests(unittest.TestCase):
             plugin=Path(directory)/"capture.so"
             plugin.write_bytes(b"\x7fELF\x02\x01"+b"\0".join(markers))
             self.assertEqual(verify_cosmetics_capture_support(plugin),plugin)
-            with self.assertRaisesRegex(RuntimeError,"glove pose"):
-                verify_cosmetics_capture_support(plugin,require_gloves=True)
-            plugin.write_bytes(plugin.read_bytes()+b"\0CS2_MVP_GLOVES_POSE_ABI 1\0")
-            with self.assertRaisesRegex(RuntimeError,"render publication"):
-                verify_cosmetics_capture_support(plugin,require_gloves=True)
-            plugin.write_bytes(plugin.read_bytes()+b"CS2_MVP_GLOVES_RENDER_ABI 1\0")
-            self.assertEqual(verify_cosmetics_capture_support(plugin,require_gloves=True),plugin)
             for omitted in markers:
                 plugin.write_bytes(b"\x7fELF\x02\x01"+b"\0".join(marker for marker in markers if marker!=omitted))
                 with self.subTest(omitted=omitted),self.assertRaisesRegex(RuntimeError,"readback and restoration"):

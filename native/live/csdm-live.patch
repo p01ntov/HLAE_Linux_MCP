@@ -52,7 +52,7 @@
      if (viewOwnerThread.load() != 0 && viewOwnerThread.load() != gettid()) {
          if (!viewFault.exchange(true)) Log("CS2_MVP_CAMERA_ERROR main view runs on another thread");
          return demo;
-@@ -469,6 +493,55 @@
+@@ -469,6 +493,47 @@
      if (engine == NULL) {
          Log("Engine interface not found");
          originalFrameStageNotify(thisptr, stage);
@@ -78,18 +78,10 @@
 +            engine->ExecuteClientCmd(0,"sv_cheats 1",true);
 +            liveController.SetSceneRegistry(cs2_live::Source2SceneRegistry());
 +            liveController.SetEntityInspector([](unsigned limit){return cs2_live::Source2ClientEntityProbe::Inspect(factory,client,limit);});
-+            try {liveController.SetAppearanceBackend(cs2_live::Source2AppearanceBackend(factory,
-+                [engine](const std::string& command){engine->ExecuteClientCmd(0,command.c_str(),true);},
-+                liveController.CanRefreshAppearance()?std::function<bool()>([]{return liveController.RequestAppearanceRefresh();}):std::function<bool()>{}));}
-+            catch(const std::exception& error){Log("CS2_CAMERA_APPEARANCE_BIND_ERROR %s",error.what());}
 +            try {liveController.SetCosmeticsBackend(cs2_live::Source2PlayerCosmetics::Bind(factory,client));}
 +            catch(const std::exception& error){Log("CS2_CAMERA_COSMETICS_BIND_ERROR %s",error.what());}
 +            liveController.SetPresentationBackend(cs2_live::Source2PresentationBackend(factory,client,hudPresentation,
 +                [engine](const std::string& command){engine->ExecuteClientCmd(0,command.c_str(),true);}));
-+            try {liveController.SetWeaponCosmeticsBackend(cs2_live::Source2WeaponCosmetics::Bind(factory,client));}
-+            catch(const std::exception& error){Log("CS2_CAMERA_WEAPON_COSMETICS_BIND_ERROR %s",error.what());}
-+            try {liveController.SetGloveCosmeticsBackend(cs2_live::Source2GloveCosmetics::Bind(factory,client));}
-+            catch(const std::exception& error){Log("CS2_CAMERA_GLOVE_COSMETICS_BIND_ERROR %s",error.what());}
 +            configuredDemo=true;
 +        }
 +        if (!playing) configuredDemo=false;
@@ -108,7 +100,7 @@
          return;
      }
  
-@@ -753,7 +826,13 @@
+@@ -753,7 +818,13 @@
      ConVar_Register();
      Log("CS2_MVP_ENVIRONMENT_ABI 1");
  
@@ -123,19 +115,15 @@
  
      RestoreGameinfoFile();
  
-@@ -765,7 +844,15 @@
+@@ -765,6 +836,11 @@
  {
      isQuitting = true;
      RequireRestoreCaptureEnvironment("shutdown");
 +    try {liveController.RestoreScene();}catch(const std::exception& error){Log("CS2_CAMERA_SCENE_RESTORE_ERROR %s",error.what());}
-+    try {liveController.RestoreAppearance();}catch(const std::exception& error){Log("CS2_CAMERA_APPEARANCE_RESTORE_ERROR %s",error.what());}
-+    try {liveController.RestoreGloveCosmetics();}catch(const std::exception& error){Log("CS2_CAMERA_GLOVE_COSMETICS_RESTORE_ERROR %s",error.what());}
 +    try {liveController.RestoreCosmetics();}catch(const std::exception& error){Log("CS2_CAMERA_COSMETICS_RESTORE_ERROR %s",error.what());}
 +    try {liveController.RestorePresentation();}catch(const std::exception& error){Log("CS2_CAMERA_PRESENTATION_RESTORE_ERROR %s",error.what());}
 +    if(!hudPresentation.Remove())Log("CS2_CAMERA_PRESENTATION_RESTORE_ERROR HUD callsites could not be restored");
-+    try {liveController.RestoreWeaponCosmetics();}catch(const std::exception& error){Log("CS2_CAMERA_WEAPON_COSMETICS_RESTORE_ERROR %s",error.what());}
 +    liveController.Stop();
-     if(!cs2_live::Source2GloveCosmetics::ShutdownRenderPhase())Log("CS2_MVP_GLOVES_RENDER_ERROR could not restore post-interpolation callsite");
      if (!viewPatch.Remove()) Log("CS2_MVP_CAMERA_ERROR could not restore main-view code");
  
      if (serverConfigShutdown != NULL) {

@@ -31,12 +31,10 @@
 #include <sys/un.h>
 #include <unistd.h>
 #include "scene_environment.h"
-#include "appearance_runtime.h"
 #include "demo_refresh.h"
 #include "player_cosmetics.h"
 #include "presentation.h"
-#include "weapon_cosmetics.h"
-#include "glove_cosmetics.h"
+#include "live_telemetry.h"
 
 namespace cs2_live {
 using Json = nlohmann::json;
@@ -161,7 +159,7 @@ inline void Normalize(Project& project) {
     if(!project.renderRange) project.renderRange=RenderRange{"composition",0,project.duration};
     ValidateRenderRange(*project.renderRange,project.duration);
     ValidateSceneSettings(project.scene);
-    ValidateCosmetics(project.cosmetics);
+    ValidateSupportedCosmetics(project.cosmetics);
     ValidatePresentation(project.presentation);
     if (project.startTick<0 || project.startTick>2000000000) throw std::invalid_argument("invalid start_tick");
     if (project.interpolation!="linear" && project.interpolation!="smooth") throw std::invalid_argument("interpolation must be linear or smooth");
@@ -176,6 +174,8 @@ inline void Normalize(Project& project) {
     if (ToJson(project).dump().size()>MaxLine-16384) throw std::invalid_argument("project JSON exceeds the local transport limit");
 }
 inline Project ReadProject(const Json& value) {
+    for(const char* key:{"appearance","appearance_pack"})if(value.contains(key))
+        throw std::invalid_argument("global appearance packs are disabled in this build");
     if (!value.is_object()) throw std::invalid_argument("project must be an object");
     Project project;
     project.name=value.value("name",project.name);
@@ -284,7 +284,11 @@ inline Pose Sample(const Project& project,double time) {
 class Controller {
 public:
     using Execute=std::function<void(const std::string&)>;
-    Controller() { const char* enabled=std::getenv("CS2_CAMERA_LIVE"); enabled_=enabled && std::strcmp(enabled,"1")==0; Publish(); }
+    explicit Controller(LiveTelemetryCadence::Now now={})
+        :cosmeticsCadence_(std::chrono::milliseconds(100),LiveTelemetryCadence::LiveOnly(),now),
+         publicationCadence_(std::chrono::milliseconds(34),LiveTelemetryCadence::LiveOnly(),now),presentation_(std::move(now)) {
+        const char* enabled=std::getenv("CS2_CAMERA_LIVE"); enabled_=enabled && std::strcmp(enabled,"1")==0; Publish();
+    }
     ~Controller() { Stop(); }
     bool Enabled() const { return enabled_; }
     void Start() {
@@ -329,15 +333,9 @@ public:
     void SetEntityInspector(std::function<Json(unsigned)> inspect) {entityInspector_=std::move(inspect);}
     void SetCosmeticsBackend(PlayerCosmetics::Callbacks callbacks) {cosmetics_.Bind(std::move(callbacks));}
     void SetPresentationBackend(Presentation::Callbacks callbacks) {presentation_.Bind(std::move(callbacks));}
-    void SetWeaponCosmeticsBackend(WeaponCosmetics::Callbacks callbacks) {weaponCosmetics_.Bind(std::move(callbacks));}
-    void RestoreWeaponCosmetics() {weaponCosmetics_.Refresh(false);}
-    void SetGloveCosmeticsBackend(GloveCosmetics::Callbacks callbacks) {gloveCosmetics_.Bind(std::move(callbacks));}
-    void RestoreGloveCosmetics() {gloveCosmetics_.Refresh(false);}
     void RestorePresentation() {presentation_.Suspend();}
     void RestoreCosmetics() {cosmetics_.Refresh(false);}
     void RestoreScene() {scene_.Apply(Json::object());}
-    void SetAppearanceBackend(AppearancePack::Callbacks callbacks) {appearance_.Bind(std::move(callbacks));}
-    void RestoreAppearance() {appearance_.Reset(false);}
     bool CanRefreshAppearance() const {
         const char* path=std::getenv("CS2_CAMERA_DEMO_PATH");if(!path)return false;
         try{DemoRefresh::CheckPath(path);return true;}catch(...){return false;}
@@ -363,6 +361,11 @@ public:
     // Called once per FRAME_START, before all playback-related early returns.
     void Frame(bool demo,int tick,bool paused,double tickRate,bool hookInstalled,const std::string& hookError,const Execute& execute) {
         if (!enabled_) return;
+        const bool previewWasPlaying=playing_;
+        const bool cameraWasValid=cameraValid_;
+        if(paused!=paused_ || hookInstalled!=hookInstalled_)publicationCadence_.Reset();
+        const bool lifetimeChanged=demo!=demo_ || (demo && (tick<tick_ || tick-tick_>int(std::max(128.0,tickRate*2))));
+        if(lifetimeChanged){cosmeticsCadence_.Reset();publicationCadence_.Reset();presentation_.InvalidateTarget();}
         if(demo!=demo_ || (demo && (tick<tick_ || tick-tick_>int(std::max(128.0,tickRate*2))))) {
             ++entityEpoch_;if(entityProbe_.is_object())entityProbe_["stale"]=true;
         }
@@ -388,7 +391,6 @@ public:
         { std::lock_guard<std::mutex> lock(viewMutex_); if (observedValid_) { cameraValid_=true; if (mode_=="free") camera_=observed_; } }
         if (!demo_ && !appearanceTransition_) {
             try {scene_.Apply(Json::object());}catch(const std::exception& exception){commandError_=exception.what();}
-            try {appearance_.Reset(false);}catch(const std::exception& exception){commandError_=exception.what();}
             playing_=false; mode_="free"; cameraValid_=false;
             std::lock_guard<std::mutex> lock(viewMutex_); observedValid_=false;
         }
@@ -399,6 +401,10 @@ public:
          presentation_.SetSceneCapabilities(capabilities);
          if(capabilities.contains("hud_visible") && capabilities["hud_visible"].contains("value") && capabilities["hud_visible"]["value"].is_boolean())visible=capabilities["hud_visible"]["value"].get<bool>();
          presentation_.Frame(demo_,visible);}
+        bool cosmeticsRefreshed=false;
+        const auto refreshCosmetics=[&]{
+        cosmeticsRefreshed=true;
+        cosmeticsSampleTick_=tick_;
         try {
             cosmetics_.Refresh(demo_);
             const auto generation=cosmetics_.State().value("runtime_generation",std::uint64_t(0));
@@ -408,25 +414,24 @@ public:
                 if(!RequestAppearanceRefresh())commandError_="player changed team with an owned model; canonical demo refresh failed or is unavailable";
             }
         }catch(const std::exception& exception){commandError_=exception.what();}
-        try{weaponCosmetics_.Refresh(demo_);}catch(const std::exception& exception){commandError_=exception.what();}
-        try{
-            gloveCosmetics_.Context(demo_,tick_,paused_);gloveCosmetics_.Refresh(demo_);
-            if(demo_ && (gloveCosmetics_.State().value("restoration_unresolved",false) || gloveCosmetics_.State().value("needs_demo_refresh",false)) && !appearanceTransition_ && !demoRefresh_.Active() && cosmeticsRefreshRevision_!=revision_) {
-                cosmeticsRefreshRevision_=revision_;gloveCosmetics_.Refresh(false);weaponCosmetics_.Refresh(false);cosmetics_.Refresh(false);
-                if(!RequestAppearanceRefresh())commandError_="glove restoration is unresolved; canonical demo refresh failed or is unavailable";
-            }
-        }catch(const std::exception& exception){commandError_=exception.what();}
+        };
+        if(cosmeticsCadence_.Due(cosmeticsBusy_ || PlayerCosmeticsRequested(project_.cosmetics)))refreshCosmetics();
         error_=priorityError.empty()?commandError_:priorityError;
         // Capturing additional keys while freely navigating should use the
         // visible demo time. A later capture can extend the initial duration.
         if (demo_ && mode_=="free" && !paused_ && !project_.keys.empty())
             cursor_=std::clamp((tick_-project_.startTick)/tickRate_,0.0,86400.0);
         std::deque<std::shared_ptr<Request>> ready;
+        bool commandProcessed=false;
         { std::lock_guard<std::mutex> lock(queueMutex_);
           for (int i=0;i<64 && !queue_.empty();++i) { ready.push_back(queue_.front()); queue_.pop_front(); } }
         for (const auto& request:ready) {
             unsigned queued=0;if(!request->phase.compare_exchange_strong(queued,1))continue;
+            commandProcessed=true;
             try {
+                if(!cosmeticsRefreshed && request->input.at("method")!="get_state") {
+                    cosmeticsCadence_.Due(true);refreshCosmetics();
+                }
                 const bool wasSyncPlaying=playing_ && syncDemo_;
                 Json result=Command(request->input,execute);
                 const auto method=request->input.at("method").get<std::string>();
@@ -440,6 +445,7 @@ public:
             } catch (const std::exception& exception) {
                 commandError_=exception.what();
                 error_=priorityError.empty()?commandError_:priorityError;
+                Publish();
                 Resolve(request,Error(request->input,exception.what()));
             }
         }
@@ -458,7 +464,7 @@ public:
             if (playing_ && cursor_>=range.out) { playing_=false; mode_="hold"; if (syncDemo_) execute("demo_pause"); }
         }
         { std::lock_guard<std::mutex> lock(viewMutex_); output_=camera_; outputEnabled_=(demo_ || appearanceTransition_) && mode_!="free" && cameraValid_; }
-        Publish();
+        if(commandProcessed || playing_ || previewWasPlaying || cameraWasValid!=cameraValid_ || presentationObservation_!=presentation_.ObservationRevision() || publicationCadence_.Due())Publish();
     }
     // No engine calls here: view construction may occur on another thread.
     bool View(float* origin,float* angles,float* fov,bool demo) {
@@ -489,18 +495,19 @@ private:
     }
     Json Snapshot() const { std::lock_guard<std::mutex> lock(stateMutex_); return Json::parse(stateJson_); }
     void Publish() {
-        auto cosmetics=cosmetics_.State();cosmetics["epoch"]=entityEpoch_;cosmetics["sample_tick"]=tick_;cosmetics["stale"]=!demo_ || cosmetics.value("stale",false);
-        cosmetics["capabilities"]["weapons"]=weaponCosmetics_.Capabilities();
-        cosmetics["capabilities"]["gloves"]=gloveCosmetics_.Capabilities();
-        auto weapons=weaponCosmetics_.State();weapons["epoch"]=entityEpoch_;weapons["sample_tick"]=tick_;weapons["stale"]=!demo_ || weapons.value("stale",false);
-        auto gloves=gloveCosmetics_.State();gloves["epoch"]=entityEpoch_;gloves["sample_tick"]=tick_;gloves["stale"]=!demo_ || gloves.value("stale",false);
+        auto cosmetics=cosmetics_.State();cosmetics["epoch"]=entityEpoch_;cosmetics["sample_tick"]=cosmeticsSampleTick_;cosmetics["stale"]=!demo_ || cosmetics.value("stale",false);
+        const Json removed={{"available",false},{"reason","weapon paint and gloves are disabled in this build"}};
+        cosmetics["capabilities"]["weapons"]=removed;cosmetics["capabilities"]["gloves"]=removed;
+        const Json weapons={{"weapons",Json::array()},{"capability",removed},{"owned_overrides",0},{"stale",true}};
+        const Json gloves={{"gloves",Json::array()},{"capability",removed},{"owned_overrides",0},{"stale",true}};
+        cosmeticsBusy_=cosmetics.value("owned_overrides",std::size_t(0))!=0;
         Json state={{"abi",Abi},{"connected",enabled_},{"demo",demo_},{"tick",tick_},{"tick_rate",tickRate_},
                     {"paused",paused_},{"mode",mode_},{"camera",ToJson(camera_)},{"camera_valid",cameraValid_},
                     {"project",ToJson(project_)},{"cursor",cursor_},{"preview_playing",playing_},{"sync_demo",syncDemo_},
                     {"revision",revision_},{"view_hook_installed",hookInstalled_},{"view_writes",viewWrites_.load()},
                     {"undo_available",!undo_.empty()},{"redo_available",!redo_.empty()},
                     {"scene_capabilities",scene_.Capabilities()},{"scene_registry",sceneRegistry_},
-                    {"appearance",appearance_.State()},{"appearance_capabilities",appearance_.Capabilities()},
+                    {"appearance",{{"active",false}}},{"appearance_capabilities",{{"available",false},{"reason","global appearance packs are disabled in this build"}}},
                     {"appearance_refresh",demoRefresh_.State()},
                     {"entity_inspection_available",bool(entityInspector_)},{"entity_probe",entityProbe_},
                     {"cosmetics",std::move(cosmetics)},
@@ -509,7 +516,7 @@ private:
                     {"glove_cosmetics",std::move(gloves)},
                     {"export_request_id",exportRequestId_}};
         if (!error_.empty()) state["error"]=error_;
-        std::lock_guard<std::mutex> lock(stateMutex_); stateJson_=state.dump();
+        std::lock_guard<std::mutex> lock(stateMutex_); stateJson_=state.dump();publicationCadence_.Advance();presentationObservation_=presentation_.ObservationRevision();
     }
     void NeedDemo() const {
         if (!demo_) throw std::runtime_error("camera control requires active local demo playback");
@@ -517,20 +524,18 @@ private:
     }
     void NeedCamera() const { if (!cameraValid_) throw std::runtime_error("waiting for the first valid game camera sample"); }
     void PrepareCosmeticsSeek() {
-        gloveCosmetics_.Refresh(false);weaponCosmetics_.Refresh(false);cosmetics_.Refresh(false);
+        cosmetics_.Refresh(false);
         ++entityEpoch_;if(entityProbe_.is_object())entityProbe_["stale"]=true;
     }
     void Commit(Project value) {
         Normalize(value);
         if(!value.scene.empty() || !value.cosmetics.empty() || !value.presentation.empty())NeedDemo();
-        cosmetics_.ValidateRequest(value.cosmetics);
-        weaponCosmetics_.ValidateRequest(value.cosmetics.value("weapon_paints",Json::array()));
-        gloveCosmetics_.ValidateRequest(value.cosmetics.value("gloves",Json::array()));
+        ValidateSupportedCosmetics(value.cosmetics);cosmetics_.ValidateRequest(value.cosmetics);
         presentation_.ValidateRequest(value.presentation);
         scene_.Apply(EffectiveSceneSettings(value));
         presentation_.SetSceneCapabilities(scene_.Capabilities());
-        try{presentation_.Apply(value.presentation);cosmetics_.Apply(value.cosmetics);weaponCosmetics_.Apply(value.cosmetics.value("weapon_paints",Json::array()));gloveCosmetics_.Apply(value.cosmetics.value("gloves",Json::array()));}
-        catch(...){scene_.Apply(EffectiveSceneSettings(project_));presentation_.SetSceneCapabilities(scene_.Capabilities());presentation_.Apply(project_.presentation);cosmetics_.Apply(project_.cosmetics);weaponCosmetics_.Apply(project_.cosmetics.value("weapon_paints",Json::array()));gloveCosmetics_.Apply(project_.cosmetics.value("gloves",Json::array()));throw;}
+        try{presentation_.Apply(value.presentation);cosmetics_.Apply(value.cosmetics);}
+        catch(...){scene_.Apply(EffectiveSceneSettings(project_));presentation_.SetSceneCapabilities(scene_.Capabilities());presentation_.Apply(project_.presentation);cosmetics_.Apply(project_.cosmetics);throw;}
         undo_.push_back(project_); if (undo_.size()>64) undo_.pop_front();
         project_=std::move(value); redo_.clear(); playing_=false; if(mode_=="preview") mode_="hold";
         cursor_=std::min(cursor_,project_.duration); ++revision_;
@@ -593,6 +598,10 @@ private:
     Json Command(const Json& request,const Execute& execute) {
         const std::string method=request.at("method").get<std::string>();
         Json params=request.value("params",Json::object());
+        if(method=="set_player_weapon_paint" || method=="reset_player_weapon_paint" || method=="set_player_gloves" || method=="reset_player_gloves")
+            throw std::runtime_error("weapon paint and gloves are disabled in this build");
+        if(method=="apply_appearance_pack" || method=="reset_appearance" || method=="probe_appearance_pack")
+            throw std::runtime_error("global appearance packs are disabled in this build");
         if (!params.is_object()) throw std::invalid_argument("params must be an object");
         if (method=="ping") return {{"pong",true},{"abi",Abi}};
         if (method=="get_state") return nullptr;
@@ -615,7 +624,7 @@ private:
             entityProbe_=entityInspector_(value.get<unsigned>());entityProbe_["epoch"]=entityEpoch_;entityProbe_["sample_tick"]=tick_;entityProbe_["snapshot_id"]=++entitySnapshot_;entityProbe_["stale"]=false;return entityProbe_;
         }
         if(method=="set_player_cosmetics" || method=="reset_player_cosmetics" || method=="set_team_palette" || method=="reset_team_palette") {
-            NeedDemo();if(appearance_.State().value("active",false))throw std::runtime_error("reset the global appearance pack before selecting per-player cosmetics");
+            NeedDemo();
             Project next=project_;
             if(method=="set_player_cosmetics") {
                 CosmeticsKeys(params,{"steam_id","nickname","agent_item_def"},"set_player_cosmetics");
@@ -639,48 +648,20 @@ private:
             }else {if(!params.empty())throw std::invalid_argument("reset_team_palette takes no arguments");next.cosmetics.erase("team_palette");}
             Commit(std::move(next));return nullptr;
         }
+        if(method=="select_player") {
+            NeedDemo();CosmeticsKeys(params,{"steam_id"},"select_player");ValidateSteamId(params.at("steam_id"));
+            const auto viewer=presentation_.Merge({{"view","player"}});
+            // Viewer selection is transient: it never rewrites the authored
+            // shot, HUD choice, keys, cosmetics or undo history.
+            presentation_.SelectPlayer(params.at("steam_id").get<std::string>(),viewer);
+            playing_=false;waitingForSeek_=false;mode_="free";return nullptr;
+        }
         if(method=="set_presentation") {
             NeedDemo();Project next=project_;next.presentation=presentation_.Merge(params);Commit(std::move(next));
             if(params.contains("view")){playing_=false;mode_="free";}
             return nullptr;
         }
-        if(method=="set_player_weapon_paint" || method=="reset_player_weapon_paint") {
-            NeedDemo();if(appearance_.State().value("active",false))throw std::runtime_error("reset the global appearance pack before selecting per-player weapon paint");
-            Project next=project_;auto paints=next.cosmetics.value("weapon_paints",Json::array());
-            if(method=="set_player_weapon_paint") {
-                weaponCosmetics_.ValidateRequest(Json::array({params}),true);
-                paints.erase(std::remove_if(paints.begin(),paints.end(),[&](const Json& item){return item["steam_id"]==params.at("steam_id") && item["item_def"]==params.at("item_def");}),paints.end());paints.push_back(params);
-            }else {
-                CosmeticsKeys(params,{"steam_id","item_def"},"reset_player_weapon_paint");ValidateSteamId(params.at("steam_id"));
-                if(params.contains("item_def") && (!params["item_def"].is_number_integer() || params["item_def"].get<long long>()<1 || params["item_def"].get<long long>()>65535))throw std::invalid_argument("item_def must be an integer in 1..65535");
-                paints.erase(std::remove_if(paints.begin(),paints.end(),[&](const Json& item){return item["steam_id"]==params["steam_id"] && (!params.contains("item_def") || item["item_def"]==params["item_def"]);}),paints.end());
-            }
-            if(paints.empty())next.cosmetics.erase("weapon_paints");else next.cosmetics["weapon_paints"]=std::move(paints);
-            Commit(std::move(next));return nullptr;
-        }
-        if(method=="set_player_gloves" || method=="reset_player_gloves") {
-            NeedDemo();if(appearance_.State().value("active",false))throw std::runtime_error("reset the global appearance pack before selecting per-player gloves");
-            Project next=project_;auto gloves=next.cosmetics.value("gloves",Json::array());
-            if(method=="set_player_gloves") {
-                gloveCosmetics_.ValidateRequest(Json::array({params}),true);
-                gloves.erase(std::remove_if(gloves.begin(),gloves.end(),[&](const Json& item){return item["steam_id"]==params.at("steam_id");}),gloves.end());gloves.push_back(params);
-            }else {
-                CosmeticsKeys(params,{"steam_id"},"reset_player_gloves");
-                if(params.contains("steam_id"))ValidateSteamId(params["steam_id"]);
-                gloves.erase(std::remove_if(gloves.begin(),gloves.end(),[&](const Json& item){return params.empty() || item["steam_id"]==params["steam_id"]; }),gloves.end());
-            }
-            if(gloves.empty())next.cosmetics.erase("gloves");else next.cosmetics["gloves"]=std::move(gloves);
-            Commit(std::move(next));return nullptr;
-        }
-        if(method=="probe_appearance_pack") {
-            NeedDemo();if(!paused_)throw std::runtime_error("pause the demo before probing a temporary appearance mount");
-            return appearance_.Probe(params);
-        }
-        if(method=="apply_appearance_pack" || method=="reset_appearance") {
-            NeedDemo();NeedCamera();
-            if(method=="apply_appearance_pack")appearance_.Apply(params);else appearance_.Reset();
-            playing_=false;if(mode_=="preview")mode_="hold";++revision_;
-        } else if(method=="set_scene") {
+        if(method=="set_scene") {
             NeedDemo();
             const auto& settings=params.at("settings");ValidateSceneSettings(settings);
             Project next=project_;
@@ -781,14 +762,12 @@ private:
             auto& source=method=="undo"?undo_:redo_; auto& target=method=="undo"?redo_:undo_;
             if(source.empty()) throw std::invalid_argument(method+" history is empty");
             if(!source.back().scene.empty() || !source.back().cosmetics.empty() || !source.back().presentation.empty() || !project_.cosmetics.empty() || !project_.presentation.empty())NeedDemo();
-            cosmetics_.ValidateRequest(source.back().cosmetics);
-            weaponCosmetics_.ValidateRequest(source.back().cosmetics.value("weapon_paints",Json::array()));
-            gloveCosmetics_.ValidateRequest(source.back().cosmetics.value("gloves",Json::array()));
+            ValidateSupportedCosmetics(source.back().cosmetics);cosmetics_.ValidateRequest(source.back().cosmetics);
             presentation_.ValidateRequest(source.back().presentation);
             scene_.Apply(EffectiveSceneSettings(source.back()));
             presentation_.SetSceneCapabilities(scene_.Capabilities());
-            try{presentation_.Apply(source.back().presentation);cosmetics_.Apply(source.back().cosmetics);weaponCosmetics_.Apply(source.back().cosmetics.value("weapon_paints",Json::array()));gloveCosmetics_.Apply(source.back().cosmetics.value("gloves",Json::array()));}
-            catch(...){scene_.Apply(EffectiveSceneSettings(project_));presentation_.SetSceneCapabilities(scene_.Capabilities());presentation_.Apply(project_.presentation);cosmetics_.Apply(project_.cosmetics);weaponCosmetics_.Apply(project_.cosmetics.value("weapon_paints",Json::array()));gloveCosmetics_.Apply(project_.cosmetics.value("gloves",Json::array()));throw;}
+            try{presentation_.Apply(source.back().presentation);cosmetics_.Apply(source.back().cosmetics);}
+            catch(...){scene_.Apply(EffectiveSceneSettings(project_));presentation_.SetSceneCapabilities(scene_.Capabilities());presentation_.Apply(project_.presentation);cosmetics_.Apply(project_.cosmetics);throw;}
             target.push_back(project_); project_=source.back(); source.pop_back(); playing_=false; if(mode_=="preview") mode_="hold"; cursor_=std::min(cursor_,project_.duration); ++revision_;
         } else throw std::invalid_argument("unknown live method: "+method);
         return nullptr;
@@ -844,6 +823,9 @@ private:
             else break;
         }
     }
+    LiveTelemetryCadence cosmeticsCadence_,publicationCadence_;
+    bool cosmeticsBusy_=false;
+    int cosmeticsSampleTick_=0;
     bool enabled_=false,ownsSocket_=false;
     std::atomic<bool> running_{false}; int listener_=-1; std::thread worker_;
     std::string socketPath_,startupError_;
@@ -857,7 +839,6 @@ private:
     Clock::time_point previewStart_=Clock::now();
     Pose camera_; Project project_; std::string mode_="free",error_,commandError_;
     SceneEnvironment scene_;
-    AppearancePack appearance_;
     DemoRefresh demoRefresh_;
     Execute currentExecute_;
     Pose appearanceSavedCamera_;
@@ -868,9 +849,7 @@ private:
     std::function<Json(unsigned)> entityInspector_;
     PlayerCosmetics cosmetics_;
     Presentation presentation_;
-    WeaponCosmetics weaponCosmetics_;
-    GloveCosmetics gloveCosmetics_;
-    std::uint64_t entityEpoch_=0,entitySnapshot_=0;
+    std::uint64_t entityEpoch_=0,entitySnapshot_=0,presentationObservation_=0;
     std::uint64_t cosmeticsRefreshRevision_=std::numeric_limits<std::uint64_t>::max();
     std::uint64_t cosmeticsGeneration_=0;
     Json entityProbe_=Json::object();

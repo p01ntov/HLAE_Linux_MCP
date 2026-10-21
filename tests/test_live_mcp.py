@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from cs2_mvp.live import LIVE_METHODS, LiveError
-from cs2_mvp.live_mcp import GUIDE_URI, Server, TOOLS, call_tool, serve
+from cs2_mvp.live_mcp import GUIDE_URI, ProtocolError, Server, TOOLS, call_tool, serve
 
 
 class FakeClient:
@@ -53,6 +53,17 @@ class McpTests(unittest.TestCase):
     def test_preset_matches_native_name_parameter(self):
         self.call("apply_preset", {"name": "dolly", "distance": 200, "duration": 5})
         self.assertEqual(self.client.calls[-1][1]["name"], "dolly")
+
+    def test_select_player_uses_exact_steamid_and_rejects_console_or_nickname_targets(self):
+        result = self.call("select_player", {"steam_id": "76561198000000000"})
+        self.assertFalse(result["result"]["isError"])
+        self.assertEqual(self.client.calls[-1], ("select_player", {"steam_id": "76561198000000000"}))
+        self.client.calls.clear()
+        for arguments in ({"nickname": "Player"}, {"steam_id": "Player; quit"},
+                          {"steam_id": "76561198000000000", "index": 7}):
+            with self.subTest(arguments=arguments):
+                self.assertEqual(self.call("select_player", arguments)["error"]["code"], -32602)
+        self.assertEqual(self.client.calls, [])
 
     def test_schema_rejects_invalid_and_unexpected_arguments(self):
         for method, arguments in [("set_camera", {"position": [1, 2]}),
@@ -204,81 +215,42 @@ class McpTests(unittest.TestCase):
                 self.assertEqual(self.call("set_project",{"presentation":value})["error"]["code"],-32602)
         self.assertEqual(self.client.calls,before)
 
-    def test_weapon_paint_uses_session_catalog_bounds_and_preserves_native_validation(self):
-        catalog={"weapons":[{"item_def":7,"kind":"weapon","paint_kits":[282]}],
-                 "gloves":[{"item_def":5027,"kind":"glove","paint_kits":[10006]}],
-                 "paint_kits":[{"id":282,"wear_min":.1,"wear_max":.7},{"id":10006,"wear_min":0,"wear_max":1}]}
-        paint={"steam_id":"76561198000000001","nickname":"Player","item_def":7,"paint_kit":282,"wear":.4,"seed":42}
-        with patch("cs2_mvp.live_mcp.session_descriptor",return_value={"game_directory":"/session/game"}), \
-             patch("cs2_mvp.cosmetics_catalog.installed_catalog",return_value=catalog) as installed:
-            self.assertFalse(self.call("set_player_weapon_paint",paint)["result"]["isError"])
-            installed.assert_called_with("/session/game")
-            self.assertEqual(self.client.calls[-1],("set_player_weapon_paint",paint))
-            omitted={key:value for key,value in paint.items() if key!="wear"}
-            self.assertFalse(self.call("set_player_weapon_paint",omitted)["result"]["isError"])
-            self.assertEqual(self.client.calls[-1],("set_player_weapon_paint",omitted))
-            for method,value in (("reset_player_weapon_paint",{"steam_id":paint["steam_id"]}),
-                                 ("reset_player_weapon_paint",{"steam_id":paint["steam_id"],"item_def":7}),
-                                 ("set_project",{"cosmetics":{"weapon_paints":[paint]}}),
-                                 ("import_project",{"project":{"keys":[],"cosmetics":{"weapon_paints":[paint]}}})):
-                self.assertFalse(self.call(method,value)["result"]["isError"])
-                self.assertEqual(self.client.calls[-1],(method,value))
-            before=list(self.client.calls)
-            for value in ({**paint,"paint_kit":999},{**paint,"wear":.01},{**paint,"wear":.8},
-                          {**paint,"item_def":5027,"paint_kit":10006}):
-                with self.subTest(value=value):
-                    self.assertTrue(self.call("set_player_weapon_paint",value)["result"]["isError"])
-            self.assertEqual(self.client.calls,before)
-            for value in ({**paint,"item_def":True},{**paint,"paint_kit":282.0},{**paint,"seed":1001},
-                          {**paint,"seed":True},{**paint,"wear":float("nan")},{**paint,"steam_id":"0"}):
-                with self.subTest(value=value):
-                    self.assertEqual(self.call("set_player_weapon_paint",value)["error"]["code"],-32602)
-            self.assertEqual(self.client.calls,before)
-            self.client.failure="weapon adapter unavailable for this build"
-            self.assertTrue(self.call("set_player_weapon_paint",paint)["result"]["isError"])
+    def test_removed_skin_and_appearance_tools_never_reach_native(self):
+        names = {tool["name"] for tool in TOOLS}
+        removed = ("set_player_weapon_paint", "reset_player_weapon_paint", "set_player_gloves",
+                   "reset_player_gloves", "apply_appearance_pack", "reset_appearance", "probe_appearance_pack")
+        self.assertEqual(len(TOOLS),31)
+        for method in removed:
+            with self.subTest(method=method):
+                self.assertNotIn(method,LIVE_METHODS)
+                self.assertNotIn("cs2_camera_"+method,names)
+                self.assertEqual(self.call(method,{})["error"]["code"],-32602)
+        self.assertEqual(self.client.calls,[])
 
-    def test_gloves_are_typed_catalog_scoped_and_persisted_without_bypassing_native(self):
-        catalog={"weapons":[{"item_def":7,"kind":"weapon","paint_kits":[282]}],
-                 "gloves":[{"item_def":5030,"kind":"glove","paint_kits":[10006]}],
-                 "paint_kits":[{"id":282,"wear_min":.1,"wear_max":.7},{"id":10006,"wear_min":.06,"wear_max":.8}]}
-        glove={"steam_id":"76561198000000001","nickname":"Player","item_def":5030,"paint_kit":10006,"wear":.4,"seed":42}
-        with patch("cs2_mvp.live_mcp.session_descriptor",return_value={"game_directory":"/session/game"}), \
-             patch("cs2_mvp.cosmetics_catalog.installed_catalog",return_value=catalog) as installed:
-            for method,value in (("set_player_gloves",glove),("set_player_gloves",{k:v for k,v in glove.items() if k!="wear"}),
-                                 ("reset_player_gloves",{"steam_id":glove["steam_id"]}),
-                                 ("set_project",{"cosmetics":{"gloves":[glove]}}),
-                                 ("import_project",{"project":{"keys":[],"cosmetics":{"gloves":[glove]}}})):
-                with self.subTest(method=method):
-                    self.assertFalse(self.call(method,value)["result"]["isError"])
-                    self.assertEqual(self.client.calls[-1],(method,value))
-            installed.assert_called_with("/session/game")
-            self.client.project["cosmetics"]={"gloves":[glove]}
-            with tempfile.TemporaryDirectory() as directory:
-                path=Path(directory)/"gloves.json"
-                call_tool(self.client,"cs2_camera_save_project",{"path":str(path)})
-                call_tool(self.client,"cs2_camera_load_project",{"path":str(path)})
-                self.assertEqual(self.client.calls[-1],("import_project",{"project":self.client.project}))
-                self.assertEqual(json.loads(path.read_text())["cosmetics"]["gloves"],[glove])
-                before=list(self.client.calls)
-                saved=json.loads(path.read_text());saved["cosmetics"]["gloves"][0]["paint_kit"]=282;path.write_text(json.dumps(saved))
-                with self.assertRaises(ValueError):
+    def test_legacy_project_skin_fields_fail_without_silent_removal(self):
+        legacy = ({"appearance":{}}, {"appearance":{"path":"/private/pack","models":["agents/models/a.vmdl"]}},
+                  {"cosmetics":{"weapon_paints":[]}}, {"cosmetics":{"gloves":[]}},
+                  {"cosmetics":{"gloves":[{"steam_id":"76561198000000001","item_def":5030,"paint_kit":10006}]}})
+        for fields in legacy:
+            with self.subTest(fields=fields), tempfile.TemporaryDirectory() as directory:
+                project={"keys":[],**fields}
+                for method,args in (("set_project",fields),("import_project",{"project":project})):
+                    self.assertEqual(self.call(method,args)["error"]["code"],-32602)
+                path=Path(directory)/"legacy.json";path.write_text(json.dumps(project))
+                with self.assertRaisesRegex(ProtocolError,"not supported"):
                     call_tool(self.client,"cs2_camera_load_project",{"path":str(path)})
-                self.assertEqual(self.client.calls,before)
-            before=list(self.client.calls)
-            for value in ({**glove,"item_def":7,"paint_kit":282},{**glove,"paint_kit":282},{**glove,"wear":.01},{**glove,"wear":.9}):
-                with self.subTest(value=value):
-                    self.assertTrue(self.call("set_player_gloves",value)["result"]["isError"])
-            self.assertTrue(self.call("set_project",{"cosmetics":{"gloves":[glove,glove]}})["result"]["isError"])
-            for value in ({**glove,"item_def":True},{**glove,"paint_kit":10006.0},{**glove,"seed":True},{**glove,"wear":float("nan")},
-                          {**glove,"raw_address":1}):
-                with self.subTest(value=value):
-                    self.assertEqual(self.call("set_player_gloves",value)["error"]["code"],-32602)
-            self.assertEqual(self.call("reset_player_gloves",{})["error"]["code"],-32602)
-            self.assertEqual(self.call("reset_player_gloves",{"steam_id":glove["steam_id"],"item_def":5030})["error"]["code"],-32602)
-            self.assertEqual(self.call("set_project",{"cosmetics":{"gloves":[glove]*129}})["error"]["code"],-32602)
-            self.assertEqual(self.client.calls,before)
-            self.client.failure="current glove item cannot be safely copied"
-            self.assertTrue(self.call("set_player_gloves",glove)["result"]["isError"])
+                self.assertEqual(json.loads(path.read_text()),project)
+        self.assertEqual(self.client.calls,[])
+
+    def test_public_catalog_only_lists_agents(self):
+        with patch("cs2_mvp.cosmetics_catalog.query_catalog",return_value={"items":[]}) as catalog:
+            self.assertEqual(call_tool(self.client,"cs2_assets_cosmetics_catalog",{"kind":"agents","team":"CT"}),{"items":[]})
+            catalog.assert_called_once_with(kind="agents",team="CT")
+            for kind in ("weapons","knives","gloves"):
+                with self.subTest(kind=kind),self.assertRaises(ProtocolError):
+                    call_tool(self.client,"cs2_assets_cosmetics_catalog",{"kind":kind})
+            self.assertEqual(catalog.call_count,1)
+        self.assertEqual(self.client.calls,[])
 
 
 if __name__ == "__main__":

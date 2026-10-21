@@ -24,7 +24,7 @@ DEPENDENCIES = {
 }
 RELATIVE = Path("cs2-server-plugin/cs2-server-plugin")
 BUILD_FLAGS = (
-    "-std=c++17", "-Wall", "-Wno-switch", "-shared", "-fPIC",
+    "-std=c++17", "-O2", "-Wall", "-Wno-switch", "-shared", "-fPIC",
     "-fvisibility=hidden", "-fvisibility-inlines-hidden", "-fno-gnu-unique",
     "-Wl,-Bsymbolic-functions", "-Wl,--version-script=live_exports.map",
     "-DPOSIX=1", "-DNO_MALLOC_OVERRIDE=1",
@@ -41,12 +41,10 @@ def source_fingerprint() -> str:
     value = hashlib.sha256(COMMIT.encode())
     for path in (NATIVE / "csdm-motion.patch", NATIVE / "motion_track.h",
                  NATIVE / "linux_view_patch.h", NATIVE / "capture_environment.h", NATIVE / "capture_cosmetics.h", HERE / "csdm-live.patch",
-                 HERE / "live_controller.h", HERE / "scene_environment.h", HERE / "appearance_pack.h", HERE / "appearance_runtime.h",
-                 HERE / "team_palette.h",
+                 HERE / "live_controller.h", HERE / "scene_environment.h", HERE / "team_palette.h",
                  HERE / "cosmetics_catalog.h", HERE / "player_cosmetics.h", HERE / "cosmetics_runtime.h",
-                 HERE / "presentation.h", HERE / "presentation_runtime.h", HERE / "hud_presentation.h",
-                 HERE / "weapon_cosmetics.h",
-                 HERE / "glove_cosmetics.h", HERE / "glove_pose.h", HERE / "glove_render_phase.h",
+                 HERE / "presentation.h", HERE / "presentation_runtime.h", HERE / "observer_player.h", HERE / "hud_presentation.h",
+                 HERE / "live_telemetry.h",
                  HERE / "demo_refresh.h",
                  HERE / "compat_math.cpp", HERE / "live_exports.map", Path(__file__).resolve()):
         value.update(path.name.encode())
@@ -155,7 +153,7 @@ def apply_patches(source: Path) -> None:
     for patch in (NATIVE / "csdm-motion.patch", HERE / "csdm-live.patch"):
         run(["git", "apply", "--check", str(patch)], source)
         run(["git", "apply", str(patch)], source)
-    for path in (NATIVE / "motion_track.h", NATIVE / "linux_view_patch.h", NATIVE / "capture_environment.h", NATIVE / "capture_cosmetics.h", HERE / "live_controller.h", HERE / "scene_environment.h", HERE / "appearance_pack.h", HERE / "appearance_runtime.h", HERE / "team_palette.h", HERE / "cosmetics_catalog.h", HERE / "player_cosmetics.h", HERE / "cosmetics_runtime.h", HERE / "presentation.h", HERE / "presentation_runtime.h", HERE / "hud_presentation.h", HERE / "weapon_cosmetics.h", HERE / "glove_cosmetics.h", HERE / "glove_pose.h", HERE / "glove_render_phase.h", HERE / "demo_refresh.h", HERE / "compat_math.cpp", HERE / "live_exports.map"):
+    for path in (NATIVE / "motion_track.h", NATIVE / "linux_view_patch.h", NATIVE / "capture_environment.h", NATIVE / "capture_cosmetics.h", HERE / "live_controller.h", HERE / "scene_environment.h", HERE / "team_palette.h", HERE / "cosmetics_catalog.h", HERE / "player_cosmetics.h", HERE / "cosmetics_runtime.h", HERE / "presentation.h", HERE / "presentation_runtime.h", HERE / "observer_player.h", HERE / "hud_presentation.h", HERE / "live_telemetry.h", HERE / "demo_refresh.h", HERE / "compat_math.cpp", HERE / "live_exports.map"):
         shutil.copyfile(path, source / RELATIVE / path.name)
     marker.write_text(digest(main) + "\n")
 

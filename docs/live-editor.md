@@ -16,7 +16,10 @@ shows recorded map metadata, date and size; **Refresh** checks for new downloads
 and **Browse…** opens another local `.dem`. Incomplete or unsupported demo
 headers are marked and cannot be selected from the library. Steam must already
 be running. Leave **Fullscreen
-Windowed** checked for a borderless window at the current monitor's resolution.
+Windowed** checked for SDL desktop fullscreen on the launcher's monitor. This
+sets the compositor's fullscreen state so KDE panels stay behind the game;
+it retains the desktop display mode. A desktop-sized borderless window alone
+does not provide that state. See [SDL's desktop fullscreen contract](https://wiki.libsdl.org/SDL3/SDL_SetWindowFullscreen).
 The application owns its session and stays open until the game exits or **End
 Session** is selected.
 
@@ -43,6 +46,12 @@ Pass `--no-launcher` for a terminal session, `--windowed` for a normal 1280×720
 window, or `--headless` to omit the overlay while retaining camera control.
 
 ## Editing a shot
+
+The player dropdown in the bottom bar and **General → Player** lists current
+demo players by nickname, team and SteamID suffix. Selecting one releases the
+held camera and requests first-person observation; it keeps camera keys and the
+HUD choice. Selection is confirmed from the engine's actual observer target.
+The adjacent **...** button opens the project save/load and history menu.
 
 1. Pause/seek the demo to the desired moment. **Shot Settings** sets the start
    tick and camera-track duration; key times are seconds relative to that tick.
@@ -144,15 +153,11 @@ configuration. The `command`, `args`, `env` and `[mcp_servers.<name>]` structure
 follows the [official MCP configuration documentation](https://learn.chatgpt.com/docs/extend/mcp?surface=cli).
 For clients using JSON, see `packaging/live/mcp-config.example.json`.
 
-The connector exposes 37 typed tools: actual camera/demo state, bounded actor
-inspection, set/release
-camera, add/update/remove keys, project settings, scrub, preview, demo control,
-presets, undo/redo, export/import, save/load, scene effects, and offline demo
-inspection, moment search and player positions, builtin asset catalog/private
-pack preparation, presentation controls, capability-gated player cosmetics,
-weapon paints/team palette and appearance
-diagnostics. The camera engine samples the
-path locally; the AI does not have to send every frame.
+The connector exposes typed camera/demo tools, bounded actor inspection,
+SteamID spectator selection, keys and presets, project settings, scrub and
+preview, undo/redo, export/import, scene and HUD controls, offline demo analysis,
+and builtin agents/team colors. The camera engine samples the path locally;
+the AI does not have to send every frame.
 
 The AI workflow is bundled in [mcp-agent-guide.md](mcp-agent-guide.md) and
 published through MCP `resources/list` / `resources/read` as
@@ -179,49 +184,22 @@ readback are authoritative. `reset_scene` restores this session's baseline.
 Scene overrides are saved in `project.scene`. Offline capture applies them
 through an internal whitelisted native adapter during preroll and requires an
 actual typed readback record before recording; unsupported controls fail the
-job. Model/skin replacement uses separate adapters. A gray-map material override
-is unavailable.
+job. A gray-map material override is unavailable.
 
-`cs2_assets_cosmetics_catalog` lists builtin agents, weapons, knives, gloves and
-evidenced paint kits from the installed item schema, localization and inventory
-icons. Agent selection requires the target player's current SteamID and team;
-T agents are limited to T players and CT agents to CT players. Read
-`get_state.cosmetics.capabilities` before using `set_player_cosmetics` or
-`set_team_palette`; unavailable categories fail explicitly. Map-based default
-agents restore the current map's original model. The project preserves player
-overrides and RGB team colors, including disabled palette colors. Native
-readback does not prove the image: `render_verified_1p` and `render_verified_3p`
-are conservative capability flags. Check the actual image for each view and
-case; one successful visual check does not validate the full catalogue.
+`cs2_assets_cosmetics_catalog` lists builtin agents from the installed item
+schema and localization. **General → Player agents** assigns an agent to an
+exact SteamID; T agents require T players and CT agents require CT players.
+Read `get_state.cosmetics.capabilities` before using `set_player_cosmetics` or
+`set_team_palette`. Map defaults restore the current map's original model.
+The project retains agent choices and RGB team colors with undo/redo.
+Native readback and `render_verified_1p`/`render_verified_3p` are separate from
+visual verification.
 
-`set_player_weapon_paint` takes `steam_id`, an exact currently owned `item_def`,
-an evidenced `paint_kit`, optional `wear` and integer `seed` (0–1000). MCP checks
-the current session installation's catalog and explicit wear range; native code
-also verifies capability, ownership and entity lifetime. This changes the paint
-on an existing matching item; it does not swap weapon/knife definitions. Omitted
-wear uses 0.01 clamped to the kit's declared range. `reset_player_weapon_paint`
-requires SteamID and optionally one item definition. Overrides persist in
-`project.cosmetics.weapon_paints`. Weapon/knife item swaps and per-player custom
-model imports are unavailable.
-
-`set_player_gloves` takes the same finish fields, with an exact builtin glove
-`item_def` and its evidenced paint kit. It targets one SteamID and saves one
-entry per player in `project.cosmetics.gloves` (up to 128 players).
-`reset_player_gloves` requires that SteamID. Read
-`get_state.cosmetics.capabilities.gloves` and `get_state.glove_cosmetics` first.
-The native adapter requires two verified engine scratch copies before touching
-the live item and retains the original item for restoration. `item_readable`,
-`ready`, `applied` and `materials_pending` describe different checks;
-`restoration_unresolved=true` retains the original journal and blocks a guessed
-reset. After resetting one SteamID, confirm its saved override is removed and its
-observed original item is restored without a target error or unresolved
-restoration. `owned_overrides` counts all retained glove journals in the session;
-it reaches zero after all glove overrides are reset. Glove rendering still
-requires inspection in each view; the `render_verified_1p`/`render_verified_3p`
-capability flags are not automatic image tests. Live apply/reset was visually
-checked for AURA, item 5030/paint 10018, wear 0.06 and seed 1: blue Sport Gloves
-applied and the original 5035 Hydra gloves returned while the demo stayed paused
-at tick 11779. This verifies that case, not the full catalogue.
+Weapon paints, glove replacements and global appearance packs have been removed
+from this build, including their runtime adapters and UI/MCP controls. Old
+projects containing requests for these removed features fail explicitly before
+mutation or export. Weapon/knife definition swaps and custom model import are
+unavailable. Stock demo weapons and gloves continue to render normally.
 
 `set_presentation` chooses `view=player|free` and `hud=gameplay|demo|hidden`.
 Gameplay HUD requires player view and its separate native adapter. Its live
@@ -232,26 +210,9 @@ view/HUD and `pending` show whether it has taken effect. The choices persist in
 `project.presentation`. Offline capture supports the authored free camera and
 demo/hidden HUD, with presentation HUD taking precedence over `scene.hud_visible`.
 Player view/gameplay HUD capture fails before closing the live session and
-remains in the saved snapshot. Agent, team-color, owned weapon-paint and glove
-capture require a capture plugin with the matching cosmetic proof and restoration
-markers. Before `startmovie`, gloves require exact item/finish readback, populated
-world/HUD poses, completed material jobs and published world scene objects. HUD
-visibility is also required when its validated parent is enabled; a validated
-disabled parent exempts only HUD visibility, with HUD pose/material checks still
-required. Missing or pending proof blocks recording. All retained capture
-overrides must be restored after the final flush. Empty cosmetic lists and a
-disabled palette retain their settings without blocking capture.
-
-`cs2_assets_appearance_catalog` reads the installed VPK index, while
-`cs2_assets_prepare_appearance_pack` creates a new private pack under
-`~/.local/share/cs2-camera/appearance-packs/`. It checks selected file CRC32 and
-never modifies the original VPK. This is global resource replacement, not
-per-player inventory/paint-kit editing. Preparation does not apply a pack.
-Read `appearance_capabilities` before a native appearance call. The temporary
-filesystem probe verifies GAME lookup bytes and unmounts without a model
-refresh; it is not proof of a visible replacement. Runtime refresh is still
-being validated. Offline appearance capture is blocked until a safe adapter
-has passed its game test.
+remains in the saved snapshot. Agent and team-color capture require matching
+native application/readback and restoration proof before recording. Empty
+agent lists and a disabled palette retain their settings without blocking capture.
 
 Example requests to an AI: “Read the current camera, add a key here, then make a
 five-second dolly ending 120 units forward”; “Set the first key's outgoing
@@ -314,14 +275,9 @@ session, waits for game/config restoration and lock release, then records and
 encodes in a background job. Cancel stops only owned capture/media processes;
 the saved project and recovery files remain available. **Reopen this demo** is
 enabled by default and restores the project, scene settings, playhead and
-camera after the job. An active unverified appearance pack blocks export
-before the live session is stopped; its reference remains in the snapshot.
-Per-player agent, weapon-paint, team-color and glove requests are preserved for
-the capture adapter and checked against its actual readback. The real Qt glove
-export in `.runs/20261021T115557Z-3fdf2a60/manifest.json` produced 125 blue-glove
-frames sampled at 1000 FPS and encoded at 60 FPS (2.083333 seconds), with native
-pose/render/attribute checks and zero retained overrides restored at tick 11851.
-See [the capture evidence](high-fps-capture.md) for the tested item and limits.
+camera after the job. Unsupported legacy skin or appearance requests block
+export before the live session stops. Agent and team-color requests are
+preserved and checked against native capture readback and restoration.
 
 The batch `cs2-mvp render` remains available and supports native capture up to
 1000 samples per demo second. See

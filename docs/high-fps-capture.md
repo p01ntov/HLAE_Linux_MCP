@@ -144,31 +144,18 @@ sampled curve overshoot must also stay within the capture backend's bounds.
 Native `project.scene` effects are passed through internal capture ABI 1 actions
 after preroll setup. Finalization requires actual engine readback for every
 requested value before `startmovie`; a JSON plan alone cannot satisfy this check.
-Unavailable controls fail the capture. Model appearance uses a separate adapter
-and remains blocked in offline capture while safe resource refresh is under
-validation.
+Unavailable controls fail the capture.
 
-Saved agents, team colors, paints on currently owned matching weapons and gloves
-are sent through private per-job cosmetic actions. The launcher checks the
-capture plugin's proof/restoration support, stages its builtin catalog in the
-private job directory, and enables cosmetics only for that capture process.
-Before `startmovie`, gloves require exact item/finish readback, populated
-world/HUD poses, completed material jobs and published world scene objects. HUD
-visibility is required when its validated parent is enabled; a validated disabled
-parent exempts only HUD visibility, with HUD pose/material checks still required.
-Missing or pending evidence blocks recording. Finalization requires zero retained
-overrides after the final flush; missing or mismatched evidence fails the job
-before encoding.
+Saved agents and team colors are sent through private per-job cosmetic actions.
+The launcher checks native proof/restoration support, stages the builtin agent
+catalog in the private job directory, and enables it only for that capture.
+Actual application proof must precede recording, and finalization requires zero
+retained overrides after the final flush before encoding.
 
-The real Qt glove export on 2026-10-21 completed in
-`.runs/20261021T115557Z-3fdf2a60/manifest.json`: AURA's builtin glove 5030 with
-paint 10018, wear 0.06 and seed 1, ticks 11779–11787, 125 native samples at
-1000 FPS, and 125 encoded frames at 60/1 FPS lasting 2.083333 seconds. The blue
-gloves were visible in `outputs/gloves-ui-export-1000-slow60.mp4`. Native
-item/attribute, pose and render-publication checks passed; restoration reported
-zero retained overrides at tick 11851 after the final flush. This proves the
-tested case, not every catalogue entry, and does not change the global
-`render_verified_1p`/`render_verified_3p` capability flags.
+Version 0.1.2 removes weapon paints, glove replacements and global appearance
+packs from the live/capture modules. Projects containing retired fields fail
+explicitly before launch. Historical glove export evidence from 0.1.1 remains
+in local diagnostics, but does not describe a feature available in this build.
 
 The real-game scene/range/slow-motion check on 2026-10-20 completed in
 `.runs/20261020T201816Z-859d44bb/manifest.json`: selected ticks 89692–89700,

@@ -111,29 +111,14 @@ class EditorUi {
   Json hotkeys_;
   Json scene_capabilities_;
   Json presentation_;
-  Json appearance_;
-  Json appearance_capabilities_;
   Json cosmetics_;
-  Json weapon_cosmetics_;
-  Json glove_cosmetics_;
   std::string cosmetic_player_;
-  int cosmetic_category_ = 0, cosmetic_agent_ = 0;
+  int cosmetic_agent_ = 0;
   int cosmetic_seen_revision_ = -1;
   std::string cosmetic_draft_target_;
   char cosmetic_filter_[128] = {};
-  int cosmetic_weapon_ = 0, cosmetic_paint_ = 0, cosmetic_seed_ = 0;
-  float cosmetic_wear_ = .01f;
-  std::string weapon_draft_target_, weapon_draft_native_;
-  char paint_filter_[128] = {};
-  int glove_item_ = 0, glove_paint_ = 0, glove_seed_ = 0;
-  float glove_wear_ = .01f;
-  std::string glove_draft_target_, glove_draft_native_;
-  bool glove_draft_dirty_ = false;
-  char glove_filter_[128] = {};
   bool palette_enabled_ = false;
   std::array<float, 3> palette_t_{{1, .25f, .25f}}, palette_ct_{{.25f, .5f, 1}};
-  char appearance_path_[4096] = {};
-  char appearance_models_[4096] = {};
   std::unordered_map<std::string, double> scene_drafts_;
   std::vector<Key> keys_;
   std::vector<std::string> capture_ids_;
@@ -245,11 +230,7 @@ class EditorUi {
     hotkeys_ = Member(state, "hotkeys");
     scene_capabilities_ = Member(state, "scene_capabilities");
     presentation_ = Member(state, "presentation");
-    appearance_ = Member(state, "appearance");
-    appearance_capabilities_ = Member(state, "appearance_capabilities");
     cosmetics_ = Member(state, "cosmetics");
-    weapon_cosmetics_ = Member(state, "weapon_cosmetics");
-    glove_cosmetics_ = Member(state, "glove_cosmetics");
     camera_ = ReadKey(Member(state, "camera"));
     const Json& project = Member(state, "project");
     project_name_ = String(Member(project, "name"), "Untitled shot");
@@ -392,6 +373,51 @@ class EditorUi {
     }
     Tip("Preview and render the whole composition or the saved In/Out region. Switching keeps both boundaries and all camera keys.");
   }
+  void DrawPlayerSelector(const Send& send, float width) {
+    const Json& capability = Member(Member(presentation_, "capabilities"), "select_player");
+    const Json& selected = Member(presentation_, "selected_player");
+    const std::string selected_id = String(Member(selected, "steam_id"));
+    const bool pending = Boolean(Member(presentation_, "selection_pending"));
+    const std::string requested = String(Member(presentation_, "requested_player"));
+    const Json& players = Member(cosmetics_, "players");
+    std::string label = String(Member(selected, "nickname"), "Choose player");
+    if (pending && players.is_array())
+      for (const auto& player : players)
+        if (String(Member(player, "steam_id")) == requested)
+          label = String(Member(player, "nickname"), "Player") + "...";
+    const bool requestable = Boolean(Member(capability, "requestable"));
+    ImGui::BeginDisabled(!demo_ || !requestable || Boolean(Member(cosmetics_, "stale")));
+    ImGui::SetNextItemWidth(width);
+    if (ImGui::BeginCombo("##observed_player", label.c_str())) {
+      DrawBackdrop();
+      bool found = false;
+      for (const int team : {3, 2}) {
+        bool heading = false;
+        if (!players.is_array()) continue;
+        for (const auto& player : players) {
+          if (Integer(Member(player, "team")) != team) continue;
+          const std::string id = String(Member(player, "steam_id"));
+          if (id.empty()) continue;
+          if (!heading) {
+            Caption(team == 3 ? "Counter-Terrorists" : "Terrorists");
+            heading = true;
+          }
+          found = true;
+          ImGui::PushID(id.c_str());
+          const std::string nickname = PlayerLabel(player);
+          if (ImGui::Selectable(nickname.c_str(), id == selected_id))
+            Emit(send, "select_player", {{"steam_id", id}});
+          ImGui::PopID();
+        }
+      }
+      if (!found) Caption("Waiting for demo players...");
+      ImGui::EndCombo();
+    }
+    ImGui::EndDisabled();
+    const std::string reason = String(Member(capability, "reason"));
+    Tip(!requestable && !reason.empty() ? reason.c_str() :
+        "Watch a demo player by nickname. This releases the held camera and keeps your camera keys.");
+  }
   void DrawRenderRange(const Send& send) {
     Caption("Preview / render range");
     DrawRenderScope(send, -1);
@@ -477,6 +503,8 @@ class EditorUi {
   }
   void DrawPresentation(const Send& send) {
     if (!presentation_.is_object()) return;
+    Caption("Player");
+    DrawPlayerSelector(send, -1);
     const Json& capabilities = Member(presentation_, "capabilities");
     const std::string actual_view = String(Member(presentation_, "view"));
     std::string view = String(Member(presentation_, "requested_view"), actual_view.c_str());
@@ -553,248 +581,9 @@ class EditorUi {
         (team == 2 ? "T" : team == 3 ? "CT" : "Observer") + "] #" +
         (id.size() > 5 ? id.substr(id.size() - 5) : id);
   }
-  void DrawWeaponPaint(const Send& send, bool knife, bool target_ready) {
-    const Json& definitions = Member(cosmetics_catalog, "weapons");
-    const Json& paints = Member(cosmetics_catalog, "paint_kits");
-    const Json& rows = Member(weapon_cosmetics_, "weapons");
-    const Json& capability = Member(weapon_cosmetics_, "capability");
-    const bool available = Boolean(Member(capability, "available"));
-    const Json* selected = nullptr;
-    const Json* definition = nullptr;
-    auto find_definition = [&](int id) -> const Json* {
-      if (definitions.is_array()) for (const auto& item : definitions)
-        if (Integer(Member(item, "item_def")) == id &&
-            (String(Member(item, "kind")) == "knife") == knife) return &item;
-      return nullptr;
-    };
-    std::vector<const Json*> owned;
-    if (rows.is_array()) for (const auto& row : rows) {
-      if (String(Member(row, "steam_id")) != cosmetic_player_) continue;
-      const int id = Integer(Member(row, "item_def"));
-      if (!find_definition(id)) continue;
-      owned.push_back(&row);
-      if (id == cosmetic_weapon_) selected = &row;
-    }
-    if (!selected && !owned.empty()) {
-      selected = owned.front();
-      for (const Json* row : owned) if (Boolean(Member(*row, "active"))) selected = row;
-      cosmetic_weapon_ = Integer(Member(*selected, "item_def"));
-    }
-    if (selected) definition = find_definition(cosmetic_weapon_);
-    Caption(knife ? "Owned knife" : "Owned weapon");
-    ImGui::SetNextItemWidth(-1);
-    const auto name = definition ? String(Member(*definition, "display_name")) : "No matching owned item";
-    if (ImGui::BeginCombo("##cosmetic_weapon", name.c_str())) {
-      DrawBackdrop();
-      for (const Json* row : owned) {
-        const int id = Integer(Member(*row, "item_def"));
-        const Json* item = find_definition(id);
-        ImGui::PushID(id);
-        const auto label = String(Member(*item, "display_name"));
-        if (ImGui::Selectable(label.c_str(), id == cosmetic_weapon_)) cosmetic_weapon_ = id;
-        ImGui::PopID();
-      }
-      ImGui::EndCombo();
-    }
-    if (!selected || !definition) {
-      ImGui::TextWrapped("Select a player who owns this category of item at the current demo tick.");
-      return;
-    }
-    const std::string target = cosmetic_player_ + ":" + std::to_string(cosmetic_weapon_);
-    const std::string native = Member(*selected, "paint_kit").dump() + ":" +
-        Member(*selected, "seed").dump() + ":" + Member(*selected, "wear").dump();
-    if (target != weapon_draft_target_ || native != weapon_draft_native_) {
-      cosmetic_paint_ = Integer(Member(*selected, "paint_kit"));
-      cosmetic_seed_ = Integer(Member(*selected, "seed"));
-      cosmetic_wear_ = Number(Member(*selected, "wear"), .01f);
-      weapon_draft_target_ = target;
-      weapon_draft_native_ = native;
-    }
-    const Json* paint = nullptr;
-    if (paints.is_array()) for (const auto& item : paints)
-      if (Integer(Member(item, "id")) == cosmetic_paint_) paint = &item;
-    const Json& allowed = Member(*definition, "paint_kits");
-    Caption("Finish from game");
-    ImGui::SetNextItemWidth(-1);
-    ImGui::SetNextWindowSizeConstraints(ImVec2(0, 0), ImVec2(std::numeric_limits<float>::max(), S(360)));
-    const auto paint_name = paint ? String(Member(*paint, "display_name")) : "Original finish";
-    if (ImGui::BeginCombo("##cosmetic_finish", paint_name.c_str())) {
-      DrawBackdrop();
-      ImGui::SetNextItemWidth(-1);
-      ImGui::InputTextWithHint("##paint_filter", "Find finish...", paint_filter_, sizeof(paint_filter_));
-      if (ImGui::Selectable("Original finish", cosmetic_paint_ == 0)) cosmetic_paint_ = 0;
-      ImGuiTextFilter filter(paint_filter_);
-      if (paints.is_array() && allowed.is_array()) for (const auto& item : paints) {
-        const int id = Integer(Member(item, "id"));
-        if (std::find(allowed.begin(), allowed.end(), Json(id)) == allowed.end()) continue;
-        const auto label = String(Member(item, "display_name"));
-        if (!filter.PassFilter(label.c_str())) continue;
-        ImGui::PushID(id);
-        if (ImGui::Selectable(label.c_str(), cosmetic_paint_ == id)) {
-          cosmetic_paint_ = id;
-          cosmetic_wear_ = Clamp(cosmetic_wear_, Number(Member(item, "wear_min")), Number(Member(item, "wear_max"), 1));
-        }
-        ImGui::PopID();
-      }
-      ImGui::EndCombo();
-    }
-    const float half = (ImGui::GetContentRegionAvail().x - S(7)) / 2;
-    const float second = ImGui::GetCursorPosX() + half + S(7);
-    Caption("Wear");ImGui::SameLine(second);Caption("Pattern seed");
-    ImGui::SetNextItemWidth(half);
-    NumericField("##cosmetic_wear", &cosmetic_wear_, paint ? Number(Member(*paint, "wear_min")) : 0,
-                 paint ? Number(Member(*paint, "wear_max"), 1) : 1, "%.4f");
-    ImGui::SameLine();ImGui::SetNextItemWidth(half);
-    NumericField("##cosmetic_seed", &cosmetic_seed_, 0, 1000);
-    ImGui::BeginDisabled(!demo_ || !target_ready || !available ||
-                        Boolean(Member(weapon_cosmetics_, "stale")) || !Boolean(Member(*selected, "ready")));
-    if (ImGui::Button("Apply finish", ImVec2(half, 0))) {
-      if (cosmetic_paint_ == 0) Emit(send, "reset_player_weapon_paint", {{"steam_id", cosmetic_player_}, {"item_def", cosmetic_weapon_}});
-      else Emit(send, "set_player_weapon_paint", {{"steam_id", cosmetic_player_}, {"item_def", cosmetic_weapon_},
-                         {"paint_kit", cosmetic_paint_}, {"wear", cosmetic_wear_}, {"seed", cosmetic_seed_}});
-    }
-    ImGui::EndDisabled();ImGui::SameLine();
-    ImGui::BeginDisabled(!demo_ || !target_ready || !available);
-    if (ImGui::Button("Restore finish", ImVec2(half, 0)))
-      Emit(send, "reset_player_weapon_paint", {{"steam_id", cosmetic_player_}, {"item_def", cosmetic_weapon_}});
-    ImGui::EndDisabled();
-    const auto error = String(Member(*selected, "error"));
-    const auto reason = String(Member(*selected, "reason"));
-    if (!error.empty()) ImGui::TextWrapped("%s", error.c_str());
-    else if (!Boolean(Member(*selected, "ready")) && !reason.empty()) ImGui::TextWrapped("%s", reason.c_str());
-    else if (Boolean(Member(*selected, "applied"))) Caption("Finish attributes and material refresh confirmed");
-    Tip("Applies a finish to this player's owned item. Switching the weapon model is a separate operation.");
-  }
-  void DrawGloves(const Send& send, int team, bool target_ready) {
-    const Json& definitions = Member(cosmetics_catalog, "gloves");
-    const Json& paints = Member(cosmetics_catalog, "paint_kits");
-    const Json& rows = Member(glove_cosmetics_, "gloves");
-    const Json* row = nullptr;
-    if (rows.is_array()) for (const auto& candidate : rows)
-      if (String(Member(candidate, "steam_id")) == cosmetic_player_) row = &candidate;
-    const std::string target = cosmetic_player_ + ":" + std::to_string(team);
-    const std::string native = row ? Member(*row, "requested_item_def").dump() + ":" +
-        Member(*row, "paint_kit").dump() + ":" + Member(*row, "seed").dump() + ":" + Member(*row, "wear").dump() : "unavailable";
-    const bool acknowledgement_pending = revision_ == pending_revision_ && ImGui::GetTime() < pending_until_;
-    if (target != glove_draft_target_ || (row && native != glove_draft_native_ &&
-        !glove_draft_dirty_ && !was_item_active_ && !acknowledgement_pending)) {
-      glove_item_ = row ? Integer(Member(*row, "requested_item_def")) : 0;
-      glove_paint_ = row ? Integer(Member(*row, "paint_kit")) : 0;
-      glove_seed_ = row ? Integer(Member(*row, "seed")) : 0;
-      glove_wear_ = row ? Number(Member(*row, "wear"), .01f) : .01f;
-      glove_draft_target_ = target;
-      glove_draft_native_ = native;
-      glove_draft_dirty_ = false;
-    }
-    auto compatible = [&](const Json& item) {
-      const Json& teams = Member(item, "allowed_teams");
-      const Json& kits = Member(item, "paint_kits");
-      return teams.is_array() && std::find(teams.begin(), teams.end(), Json(team)) != teams.end() &&
-          kits.is_array() && !kits.empty();
-    };
-    auto definition = [&]() -> const Json* {
-      if (definitions.is_array()) for (const auto& item : definitions)
-        if (Integer(Member(item, "item_def")) == glove_item_ && compatible(item)) return &item;
-      return nullptr;
-    };
-    const Json* item = definition();
-    Caption("Gloves from game");
-    ImGui::SetNextItemWidth(-1);
-    const std::string name = item ? String(Member(*item, "display_name")) : "Original gloves";
-    if (ImGui::BeginCombo("##glove_item", name.c_str())) {
-      DrawBackdrop();
-      if (ImGui::Selectable("Original gloves", glove_item_ == 0)) { glove_item_ = 0; glove_paint_ = 0; glove_draft_dirty_ = true; }
-      if (definitions.is_array()) for (const auto& candidate : definitions) {
-        if (!compatible(candidate)) continue;
-        const int id = Integer(Member(candidate, "item_def"));
-        ImGui::PushID(id);
-        const auto label = String(Member(candidate, "display_name"));
-        if (ImGui::Selectable(label.c_str(), id == glove_item_)) {
-          glove_item_ = id;
-          glove_draft_dirty_ = true;
-          const Json& kits = Member(candidate, "paint_kits");
-          if (std::find(kits.begin(), kits.end(), Json(glove_paint_)) == kits.end()) glove_paint_ = Integer(kits.front());
-        }
-        ImGui::PopID();
-      }
-      ImGui::EndCombo();
-    }
-    item = definition();
-    auto paint_definition = [&]() -> const Json* {
-      if (paints.is_array()) for (const auto& paint : paints)
-        if (Integer(Member(paint, "id")) == glove_paint_ && String(Member(paint, "category")) == "glove") return &paint;
-      return nullptr;
-    };
-    if (item) {
-      const Json& kits = Member(*item, "paint_kits");
-      const Json* paint = paint_definition();
-      Caption("Glove finish");
-      ImGui::SetNextItemWidth(-1);
-      ImGui::SetNextWindowSizeConstraints(ImVec2(0, 0), ImVec2(std::numeric_limits<float>::max(), S(360)));
-      const auto label = paint ? String(Member(*paint, "display_name")) : "Choose finish";
-      if (ImGui::BeginCombo("##glove_finish", label.c_str())) {
-        DrawBackdrop();
-        ImGui::SetNextItemWidth(-1);
-        ImGui::InputTextWithHint("##glove_filter", "Find finish...", glove_filter_, sizeof(glove_filter_));
-        ImGuiTextFilter filter(glove_filter_);
-        if (paints.is_array()) for (const auto& candidate : paints) {
-          const int id = Integer(Member(candidate, "id"));
-          if (String(Member(candidate, "category")) != "glove" || std::find(kits.begin(), kits.end(), Json(id)) == kits.end()) continue;
-          const auto finish_name = String(Member(candidate, "display_name"));
-          if (!filter.PassFilter(finish_name.c_str())) continue;
-          ImGui::PushID(id);
-          if (ImGui::Selectable(finish_name.c_str(), glove_paint_ == id)) { glove_paint_ = id; glove_draft_dirty_ = true; }
-          ImGui::PopID();
-        }
-        ImGui::EndCombo();
-      }
-      paint = paint_definition();
-      const float minimum = paint ? Number(Member(*paint, "wear_min")) : 0;
-      const float maximum = paint ? Number(Member(*paint, "wear_max"), 1) : 1;
-      glove_wear_ = Clamp(glove_wear_, minimum, maximum);
-      const float half = (ImGui::GetContentRegionAvail().x - S(7)) / 2;
-      const float second = ImGui::GetCursorPosX() + half + S(7);
-      Caption("Wear");ImGui::SameLine(second);Caption("Pattern seed");
-      ImGui::SetNextItemWidth(half);
-      if (NumericField("##glove_wear", &glove_wear_, minimum, maximum, "%.4f")) glove_draft_dirty_ = true;
-      ImGui::SameLine();ImGui::SetNextItemWidth(half);
-      if (NumericField("##glove_seed", &glove_seed_, 0, 1000)) glove_draft_dirty_ = true;
-    }
-    const bool available = Boolean(Member(Member(glove_cosmetics_, "capability"), "available"));
-    const bool current = target_ready && !Boolean(Member(glove_cosmetics_, "stale"));
-    const bool ready = row && Boolean(Member(*row, "ready")) && Boolean(Member(*row, "item_readable")) &&
-        !Boolean(Member(*row, "restoration_unresolved"));
-    const float half = (ImGui::GetContentRegionAvail().x - S(7)) / 2;
-    ImGui::BeginDisabled(!demo_ || !available || !current || !ready || (glove_item_ != 0 && (!item || !paint_definition())));
-    if (ImGui::Button("Apply gloves", ImVec2(half, 0))) {
-      glove_draft_dirty_ = false;
-      if (!glove_item_) Emit(send, "reset_player_gloves", {{"steam_id", cosmetic_player_}});
-      else Emit(send, "set_player_gloves", {{"steam_id", cosmetic_player_}, {"item_def", glove_item_},
-                                        {"paint_kit", glove_paint_}, {"wear", glove_wear_}, {"seed", glove_seed_}});
-    }
-    ImGui::EndDisabled();ImGui::SameLine();
-    ImGui::BeginDisabled(!demo_ || !available || !target_ready);
-    if (ImGui::Button("Restore gloves", ImVec2(half, 0))) { glove_draft_dirty_ = false; Emit(send, "reset_player_gloves", {{"steam_id", cosmetic_player_}}); }
-    ImGui::EndDisabled();
-    if (row) {
-      const auto error = String(Member(*row, "error"));
-      const auto reason = String(Member(*row, "reason"));
-      if (!error.empty()) ImGui::TextWrapped("%s", error.c_str());
-      else if (!ready && !reason.empty()) ImGui::TextWrapped("%s", reason.c_str());
-      else if (Integer(Member(*row, "requested_item_def")) && Boolean(Member(*row, "materials_pending"))) {
-        if (Member(*row, "world_pose_ready").is_boolean() && !Boolean(Member(*row, "world_pose_ready")))
-          Caption("Updating glove pose...");
-        else if (Member(*row, "world_render_ready").is_boolean() &&
-                 (!Boolean(Member(*row, "world_render_ready")) || !Boolean(Member(*row, "hud_render_ready"))))
-          Caption("Updating glove visibility...");
-        else Caption("Preparing glove materials...");
-      }
-      else if (Boolean(Member(*row, "applied"))) Caption("Glove item and material refresh confirmed");
-    } else Caption("Waiting for the player's glove item");
-  }
   void DrawCosmetics(const Send& send) {
     if (!cosmetics_.is_object() && !cosmetics_catalog.is_object()) return;
-    if (!ImGui::CollapsingHeader("Models and skins")) return;
+    if (!ImGui::CollapsingHeader("Player agents")) return;
     const Json& players = Member(cosmetics_, "players");
     const Json* selected = nullptr;
     if (players.is_array()) {
@@ -825,24 +614,12 @@ class EditorUi {
       }
       ImGui::EndCombo();
     }
-    const char* categories[] = {"Agents", "Weapons", "Knives", "Gloves"};
-    const char* ids[] = {"agents", "weapons", "knives", "gloves"};
-    Caption("Category");
-    ImGui::SetNextItemWidth(-1);
-    if (ImGui::BeginCombo("##cosmetic_category", categories[cosmetic_category_])) {
-      DrawBackdrop();
-      for (int i = 0; i < 4; ++i)
-        if (ImGui::Selectable(categories[i], cosmetic_category_ == i)) cosmetic_category_ = i;
-      ImGui::EndCombo();
-    }
-    const Json& capability = (cosmetic_category_ == 1 || cosmetic_category_ == 2) && weapon_cosmetics_.is_object()
-        ? Member(weapon_cosmetics_, "capability") : cosmetic_category_ == 3 && glove_cosmetics_.is_object()
-        ? Member(glove_cosmetics_, "capability") : Member(Member(cosmetics_, "capabilities"), ids[cosmetic_category_]);
+    const Json& capability = Member(Member(cosmetics_, "capabilities"), "agents");
     const bool available = Boolean(Member(capability, "available"));
     const int team = selected ? Integer(Member(*selected, "team")) : 0;
     const bool target_ready = selected && (team == 2 || team == 3) &&
         !Boolean(Member(cosmetics_, "stale"));
-    if (cosmetic_category_ == 0) {
+    {
       const std::string target = cosmetic_player_ + ":" + std::to_string(team);
       if (target != cosmetic_draft_target_ ||
           (revision_ != cosmetic_seen_revision_ && !was_item_active_ &&
@@ -895,8 +672,6 @@ class EditorUi {
       ImGui::EndDisabled();
       if (target_ready && available && !model_ready) Caption("Waiting for the player's model binding");
     }
-    if (cosmetic_category_ == 1 || cosmetic_category_ == 2) DrawWeaponPaint(send, cosmetic_category_ == 2, target_ready);
-    if (cosmetic_category_ == 3) DrawGloves(send, team, target_ready);
     if (!available) {
       std::string reason = String(Member(capability, "reason"));
       if (reason.empty()) reason = "Live replacement is not available for this category on the current game build.";
@@ -908,54 +683,7 @@ class EditorUi {
       else if (Boolean(Member(*selected, "applied"))) Caption("Player override active");
     }
     if (!cosmetics_catalog_error.empty()) ImGui::TextWrapped("%s", cosmetics_catalog_error.c_str());
-    ImGui::BeginDisabled(true);
-    ImGui::Button("Import...", ImVec2(-1, 0));
-    ImGui::EndDisabled();
-    Tip("Custom compiled Source 2 models require a compatible per-player resource adapter. The installed-game catalog is the primary source.");
-    DrawAppearance(send);
     ImGui::Separator();
-  }
-  void DrawAppearance(const Send& send) {
-    if (!appearance_capabilities_.is_object()) return;
-    if (!ImGui::TreeNode("Advanced resource diagnostics")) return;
-    ImGui::TextWrapped("Compiled Source 2 appearance pack. Replaces matching model resources throughout the scene.");
-    Caption("Pack directory");
-    ImGui::SetNextItemWidth(-1);
-    ImGui::InputText("##appearance_path", appearance_path_, sizeof(appearance_path_));
-    Caption("Model resources (.vmdl), one per line");
-    ImGui::SetNextItemWidth(-1);
-    ImGui::InputTextMultiline("##appearance_models", appearance_models_, sizeof(appearance_models_), ImVec2(-1, S(76)));
-    const bool available = Boolean(Member(appearance_capabilities_, "available"));
-    ImGui::BeginDisabled(!demo_ || !available);
-    const float half = (ImGui::GetContentRegionAvail().x - S(7)) / 2;
-    if (ImGui::Button("Apply pack", ImVec2(half, 0))) {
-      Json models = Json::array();
-      std::string lines(appearance_models_);
-      size_t begin = 0;
-      while (begin < lines.size()) {
-        const auto end = lines.find('\n', begin);
-        std::string value = lines.substr(begin, end == std::string::npos ? end : end - begin);
-        const auto first = value.find_first_not_of(" \t\r");
-        const auto last = value.find_last_not_of(" \t\r");
-        if (first != std::string::npos) models.push_back(value.substr(first, last - first + 1));
-        if (end == std::string::npos) break;
-        begin = end + 1;
-      }
-      Emit(send, "apply_appearance_pack", {{"path", std::string(appearance_path_)}, {"models", models}});
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Reset appearance", ImVec2(half, 0))) Emit(send, "reset_appearance");
-    ImGui::EndDisabled();
-    if (!available) ImGui::TextWrapped("Appearance replacement is unavailable on this game build.");
-    if (Boolean(Member(appearance_, "active"))) {
-      const auto path = String(Member(appearance_, "path"));
-      ImGui::TextWrapped("Active: %s", path.c_str());
-      ImGui::TextWrapped("Resource pack mounted. This is a global resource override.");
-    }
-    const auto error = String(Member(appearance_, "error"));
-    if (!error.empty()) ImGui::TextWrapped("%s", error.c_str());
-    Tip("An AI client can list installed models and prepare a pack with the asset MCP tools. Custom files must already be compiled for Source 2.");
-    ImGui::TreePop();
   }
   void ApplyStyle() const {
     auto& style = ImGui::GetStyle();
@@ -1166,7 +894,8 @@ class EditorUi {
         S(3), connected_ ? U32(Accent()) : Ink(.3f));
     Caption(connected_ ? (!demo_ ? "No demo loaded" :
                          mode_ == "preview" ? "Playing camera preview" :
-                         mode_ == "hold" ? "Camera held" : "Free camera") :
+                         mode_ == "hold" ? "Camera held" :
+                         String(Member(presentation_, "view")) == "player" ? "Following player" : "Free camera") :
                         "Waiting for game");
     if (!connected_) {
       ImGui::Spacing();
@@ -1722,14 +1451,13 @@ class EditorUi {
     if (IconButton("##next", Icon::Last, "Next keyframe")) JumpKey(send, 1);
     ImGui::EndDisabled();
     ImGui::SameLine(0, S(30));
-    std::string name = project_name_;
-    while (name.size() > 3 && ImGui::CalcTextSize(name.c_str()).x > S(175))
-      name = name.substr(0, name.size() - 4) + "...";
     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(181.f/255, 212.f/255, 238.f/255, 1));
-    if (ToolbarButton((name + "##project").c_str(), ImVec2(S(190), S(36))))
+    if (ToolbarButton("...##project", ImVec2(S(32), S(36))))
       ImGui::OpenPopup("##camera_project_menu");
     ImGui::PopStyleColor();
-    Tip("Project: save, load, undo and redo.");
+    Tip(("Project: " + project_name_ + ". Save, load, undo and redo.").c_str());
+    ImGui::SameLine(0, S(4));
+    DrawPlayerSelector(send, S(154));
     ImGui::SameLine(0, S(10));
     ImGui::BeginDisabled(!demo_);
     if (CameraButton("##capture", "Capture", S(110))) Capture(send);

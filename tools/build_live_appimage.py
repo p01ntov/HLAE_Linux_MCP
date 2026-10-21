@@ -175,7 +175,7 @@ def build(plugin: Path, overlay: Path, output: Path, *, appdir_only=False) -> Pa
     environment = dict(os.environ, ARCH="x86_64", APPIMAGE_EXTRACT_AND_RUN="1")
     run([appimagetool, "--no-appstream", appdir, output.resolve()], env=environment)
     output.chmod(0o755)
-    metadata = {"version": "0.1.1", "appimage": str(output.resolve()), "sha256": sha256(output),
+    metadata = {"version": "0.1.2", "appimage": str(output.resolve()), "sha256": sha256(output),
                 "plugin_sha256": sha256(plugin), "overlay_sha256": sha256(overlay),
                 "capture_plugin_sha256": sha256(capture_assets / "libcamera_capture.so"),
                 "stock_plugin_sha256": sha256(capture_assets / "libserver_stock.so"),
