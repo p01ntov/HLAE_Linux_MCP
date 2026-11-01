@@ -1,0 +1,29 @@
+{
+  "name": "1000 FPS stationary model probe",
+  "start_tick": 89688,
+  "duration": 0.125,
+  "interpolation": "smooth",
+  "keys": [
+    {
+      "id": "probe-hold",
+      "time": 0,
+      "position": [
+        740,
+        -1450,
+        -382
+      ],
+      "angles": [
+        -8,
+        141,
+        0
+      ],
+      "fov": 56,
+      "easing": [
+        0,
+        0,
+        1,
+        1
+      ]
+    }
+  ]
+}

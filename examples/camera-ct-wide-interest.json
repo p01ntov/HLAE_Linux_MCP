@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "type": "keyframes",
+  "position_easing": "smootherstep",
+  "position_keys": [
+    {"time": 0, "position": [-280, -1700, 230]},
+    {"time": 3.140625, "position": [-320, -1950, 260]}
+  ],
+  "rotation_easing": "smoothstep",
+  "point_of_interest": [120, -1660, 32],
+  "fov": 105,
+  "floor_z": 0,
+  "clearance": 96
+}

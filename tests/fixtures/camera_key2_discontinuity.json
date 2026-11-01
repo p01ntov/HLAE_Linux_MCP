@@ -1,0 +1,82 @@
+{
+  "description": "User-observed incoming/outgoing timing mismatch at the second chronological key; three keys use nonuniform intervals. Source: local Camera Studio 0.1.9 read-only state, 2026-10-25.",
+  "project": {
+    "cosmetics": {},
+    "duration": 5.0,
+    "interpolation": "smooth",
+    "keys": [
+      {
+        "angles": [
+          6.679660797119141,
+          243.98069763183594,
+          0.0
+        ],
+        "easing": [
+          0.1884261816740036,
+          0.7692307233810425,
+          1.0,
+          1.0
+        ],
+        "fov": 90.0,
+        "id": "key-1",
+        "position": [
+          1646.0058969653594,
+          -522.5998447311922,
+          -285.35150146484375
+        ],
+        "time": 0.0
+      },
+      {
+        "angles": [
+          16.518735885620117,
+          262.19158935546875,
+          7.27808952331543
+        ],
+        "easing": [
+          0.0,
+          0.0,
+          0.5799999833106995,
+          1.0
+        ],
+        "fov": 90.0,
+        "id": "key-3",
+        "position": [
+          2057.275517014965,
+          -403.806691347173,
+          -285.35150146484375
+        ],
+        "time": 1.34375
+      },
+      {
+        "angles": [
+          35.67966079711914,
+          228.98069763183594,
+          0.0
+        ],
+        "easing": [
+          0.0,
+          0.0,
+          1.0,
+          1.0
+        ],
+        "fov": 90.0,
+        "id": "key-2",
+        "position": [
+          2732.7988504059304,
+          -453.20137338223515,
+          -285.35150146484375
+        ],
+        "time": 2.421875
+      }
+    ],
+    "name": "Untitled cinematic",
+    "presentation": {},
+    "render_range": {
+      "in": 0.0,
+      "mode": "composition",
+      "out": 5.0
+    },
+    "scene": {},
+    "start_tick": 3081
+  }
+}

@@ -1,0 +1,118 @@
+{
+  "version": 1,
+  "type": "keyframes",
+  "hold_last": true,
+  "position_interpolation": "hermite",
+  "position_easing": "linear",
+  "rotation_easing": "smoothstep",
+  "position_keys": [
+    {
+      "time": 0,
+      "position": [
+        740,
+        -1450,
+        -382
+      ]
+    },
+    {
+      "time": 1.2,
+      "position": [
+        735,
+        -1450,
+        -382
+      ]
+    },
+    {
+      "time": 2.15,
+      "position": [
+        724,
+        -1458,
+        -378.5
+      ]
+    }
+  ],
+  "rotation_keys": [
+    {
+      "time": 0,
+      "angles": [
+        -7.694884040213791,
+        119.58244601936917,
+        -0.35
+      ]
+    },
+    {
+      "time": 0.3125,
+      "angles": [
+        -11.401634282618891,
+        128.35768864580967,
+        0.15
+      ]
+    },
+    {
+      "time": 0.75,
+      "angles": [
+        -8.07701064440011,
+        140.96105493150648,
+        0.25
+      ]
+    },
+    {
+      "time": 1.0625,
+      "angles": [
+        -8.009586841727206,
+        141.28287058007567,
+        0.4
+      ]
+    },
+    {
+      "time": 1.5,
+      "angles": [
+        2.3821594020026358,
+        140.55217921167753,
+        0.1
+      ]
+    },
+    {
+      "time": 2.25,
+      "angles": [
+        2.35998631794562,
+        145.6819930030185,
+        0
+      ]
+    }
+  ],
+  "fov_keys": [
+    {
+      "time": 0,
+      "fov": 56
+    },
+    {
+      "time": 1.2,
+      "fov": 56
+    },
+    {
+      "time": 2.15,
+      "fov": 49
+    }
+  ],
+  "fov_easing": "smootherstep",
+  "floor_z": -416,
+  "clearance": 24,
+  "shot_markers": [
+    {
+      "time": 0,
+      "tick": 89624,
+      "label": "low Main-side operator, 34 units above A floor"
+    },
+    {
+      "time": 1.0625,
+      "tick": 89692,
+      "label": "Zeus hit; keep CT and AURA complete"
+    },
+    {
+      "time": 2.15,
+      "tick": 89762,
+      "label": "gentle physical push and narrower lens; both bodies remain in composition"
+    }
+  ]
+}

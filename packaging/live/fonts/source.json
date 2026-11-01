@@ -1,0 +1,8 @@
+{
+  "font": "NotoSans-Regular.ttf",
+  "source": "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+  "sha256": "478c558ea716033cd60c03438f628dfa75694dcf6b5f6d505a2f05fd2b4f3823",
+  "copyright": "Copyright 2022 The Noto Project Authors (https://github.com/notofonts/latin-greek-cyrillic)",
+  "license": "SIL Open Font License 1.1",
+  "license_url": "https://raw.githubusercontent.com/notofonts/latin-greek-cyrillic/71cf6f3ca9c185d809dd800ce9a9e58e1c16f1b1/OFL.txt"
+}

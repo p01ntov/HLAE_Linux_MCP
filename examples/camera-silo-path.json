@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "type": "path",
+  "curve": "catmull_rom",
+  "constant_speed": true,
+  "easing": "smootherstep",
+  "points": [
+    {
+      "position": [
+        500,
+        -2250,
+        450
+      ]
+    },
+    {
+      "position": [
+        220,
+        -2300,
+        500
+      ]
+    },
+    {
+      "position": [
+        -100,
+        -2150,
+        450
+      ]
+    }
+  ],
+  "look_at": {
+    "point": [
+      140,
+      -1790,
+      0
+    ]
+  },
+  "floor_z": 0,
+  "clearance": 200
+}

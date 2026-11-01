@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "type": "static",
+  "position": [740, -1450, -382],
+  "angles": [-8, 141],
+  "fov": 56,
+  "floor_z": -416,
+  "clearance": 24
+}

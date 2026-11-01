@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "type": "orbit",
+  "radius": 400,
+  "height": 150,
+  "start_angle": -20,
+  "end_angle": 20,
+  "easing": "smootherstep",
+  "look_at": {"point": [120, -1650, 40]}
+}

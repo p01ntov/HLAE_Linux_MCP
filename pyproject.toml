@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cs2-linux-mvp"
+version = "0.1.13"
+description = "Native Linux CS2 demo POV rendering with the CS Demo Manager plugin"
+requires-python = ">=3.11"
+dependencies = ["demoparser2==0.42.0"]
+
+[project.optional-dependencies]
+agents = ["websockets==17.2"]
+live = ["PySide6-Essentials==6.10.3"]
+appimage = ["PyInstaller==6.16.0", "PySide6-Essentials==6.10.3"]
+
+[project.scripts]
+cs2-mvp = "cs2_mvp.cli:main"
+cs2-camera-studio = "cs2_mvp.live:main"
+cs2-camera-mcp = "cs2_mvp.live_mcp:serve"
+
+[tool.setuptools.packages.find]
+where = ["src"]

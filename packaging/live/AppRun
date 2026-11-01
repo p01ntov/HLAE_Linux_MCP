@@ -1,0 +1,3 @@
+#!/bin/sh
+# Keep stdio untouched so the same AppImage also works as an MCP server.
+exec "$APPDIR/usr/bin/cs2-camera-studio" "$@"

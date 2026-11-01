@@ -1,0 +1,118 @@
+{
+  "version": 1,
+  "type": "keyframes",
+  "hold_last": true,
+  "position_interpolation": "hermite",
+  "position_easing": "linear",
+  "rotation_easing": "smoothstep",
+  "position_keys": [
+    {
+      "time": 0,
+      "position": [
+        -200,
+        -1690,
+        210
+      ]
+    },
+    {
+      "time": 1.5,
+      "position": [
+        -190,
+        -1840,
+        235
+      ]
+    },
+    {
+      "time": 3,
+      "position": [
+        -100,
+        -2120,
+        220
+      ]
+    },
+    {
+      "time": 4,
+      "position": [
+        210,
+        -2250,
+        140
+      ]
+    },
+    {
+      "time": 6.15,
+      "position": [
+        550,
+        -2120,
+        -120
+      ]
+    }
+  ],
+  "rotation_keys": [
+    {
+      "time": 0,
+      "angles": [
+        36.88810379246889,
+        43.14574265882989,
+        -0.5
+      ]
+    },
+    {
+      "time": 1.5,
+      "angles": [
+        25.32764803968913,
+        32.71650207482374,
+        -2.5
+      ]
+    },
+    {
+      "time": 3,
+      "angles": [
+        30.727110589766266,
+        28.613923405087494,
+        1.2
+      ]
+    },
+    {
+      "time": 4,
+      "angles": [
+        35.88055170579304,
+        35.90972307917768,
+        0.8
+      ]
+    },
+    {
+      "time": 6.15,
+      "angles": [
+        34.42616604808619,
+        50.38931175997341,
+        0
+      ]
+    }
+  ],
+  "floor_z": -408,
+  "clearance": 96,
+  "fov": 35,
+  "shot_markers": [
+    {
+      "time": 0,
+      "label": "CT hero, lateral approach"
+    },
+    {
+      "time": 1.5,
+      "label": "bank lightly into the jump"
+    },
+    {
+      "time": 3,
+      "tick": 80283,
+      "label": "both full bodies inside safe frame; CT is primary"
+    },
+    {
+      "time": 4,
+      "label": "reveal dead T; do not follow falling CT"
+    },
+    {
+      "time": 6.15,
+      "label": "finish push-in and settle"
+    }
+  ]
+}

@@ -1,0 +1,135 @@
+--- a/cs2-server-plugin/cs2-server-plugin/main.cpp
++++ b/cs2-server-plugin/cs2-server-plugin/main.cpp
+@@ -14,6 +14,10 @@
+ #include "linux_view_patch.h"
+ #define CS2_CAMERA_SOURCE2_CVARS 1
+ #include "capture_environment.h"
++#include "live_controller.h"
++#include "team_palette.h"
++#include "cosmetics_runtime.h"
++#include "presentation_runtime.h"
+ #ifdef _WIN32
+ #define SERVER_LIB_PATH "\\csgo\\bin\\win64\\server.dll"
+ #else
+@@ -96,6 +100,21 @@
+ cs2_mvp::LinuxViewPatch viewPatch;
+ cs2_mvp::CaptureEnvironment captureEnvironment;
+ bool captureEnvironmentBound=false;
++cs2_live::Controller liveController;
++cs2_live::LinuxHudPresentation hudPresentation;
++
++extern "C" __attribute__((visibility("default"))) const char* cs2_live_state_json() {
++    static thread_local std::string state; state=liveController.StateJson(); return state.c_str();
++}
++extern "C" __attribute__((visibility("default"))) const char* cs2_live_ui_state_json() {
++    static thread_local std::string state; state=liveController.UiStateJson(); return state.c_str();
++}
++extern "C" __attribute__((visibility("default"))) const char* cs2_live_map_preview_json() {
++    static thread_local std::string preview; preview=liveController.MapPreviewJson(); return preview.c_str();
++}
++extern "C" __attribute__((visibility("default"))) void cs2_live_command_json(const char* command) {
++    liveController.EnqueueText(command);
++}
+ size_t viewWrites = 0;
+ size_t fovWrites = 0;
+ double lastFov = 0;
+@@ -352,6 +365,8 @@
+ }
+ 
+ void LoadSequencesFile(string demoPath) {
++    // Live sessions never consume batch actions (including any scheduled quit).
++    if (liveController.Enabled()) return;
+     std::lock_guard<std::mutex> lock(sequencesMutex);
+     sequences = {};
+     EndCameraTrack(currentTick.load(), "load_demo");
+@@ -409,6 +424,15 @@
+ bool OverrideDemoView(void* view) {
+     auto engine = GetEngine();
+     const bool demo = engine != NULL && engine->IsPlayingDemo();
++    if (liveController.Enabled()) {
++        if (demo && !isQuitting) {
++            auto* bytes=static_cast<unsigned char*>(view);
++            liveController.View(reinterpret_cast<float*>(bytes+cs2_mvp::LinuxViewPatch::Origin),
++                reinterpret_cast<float*>(bytes+cs2_mvp::LinuxViewPatch::Angles),
++                reinterpret_cast<float*>(bytes+cs2_mvp::LinuxViewPatch::Fov),demo);
++        }
++        return demo;
++    }
+     if (viewOwnerThread.load() != 0 && viewOwnerThread.load() != gettid()) {
+         if (!viewFault.exchange(true)) Log("CS2_MVP_CAMERA_ERROR main view runs on another thread");
+         return demo;
+@@ -469,6 +493,47 @@
+     if (engine == NULL) {
+         Log("Engine interface not found");
+         originalFrameStageNotify(thisptr, stage);
++        return;
++    }
++
++    // Service the editor even while paused or outside a demo. All engine calls
++    // and project mutations stay on this thread. Batch rendering is bypassed.
++    if (liveController.Enabled()) {
++        const bool playing=engine->IsPlayingDemo();
++        if(playing)demoPath=nullptr; // The startup fallback is consumed by the first successful demo.
++        auto player=playing?engine->GetDemoPlayer():nullptr;
++        static std::string liveHookError;
++        static bool attemptedViewHook=false;
++        static bool configuredDemo=false;
++        if (playing && !attemptedViewHook) {
++            attemptedViewHook=true;
++            const char* error=viewPatch.Install(reinterpret_cast<void*>(&OverrideDemoView));
++            liveHookError=error?error:"";
++            Log("CS2_CAMERA_LIVE_VIEW installed=%d error=%s",viewPatch.Installed(),liveHookError.c_str());
++        }
++        if (playing && !configuredDemo) {
++            engine->ExecuteClientCmd(0,"sv_cheats 1",true);
++            liveController.SetSceneRegistry(cs2_live::Source2SceneRegistry());
++            liveController.SetEntityInspector([](unsigned limit){return cs2_live::Source2ClientEntityProbe::Inspect(factory,client,limit);});
++            try {liveController.SetCosmeticsBackend(cs2_live::Source2PlayerCosmetics::Bind(factory,client));}
++            catch(const std::exception& error){Log("CS2_CAMERA_COSMETICS_BIND_ERROR %s",error.what());}
++            liveController.SetPresentationBackend(cs2_live::Source2PresentationBackend(factory,client,hudPresentation,
++                [engine](const std::string& command){engine->ExecuteClientCmd(0,command.c_str(),true);}));
++            configuredDemo=true;
++        }
++        if (!playing) configuredDemo=false;
++        double tickRate=64;
++        if (player) { const float interval=player->TicksToTime(1); if(interval>0 && std::isfinite(interval)) tickRate=1.0/interval; }
++        liveController.Frame(playing,player?player->GetDemoTick():0,player && player->IsPlaybackPaused(),
++            tickRate,viewPatch.Installed(),liveHookError,
++            [engine](const std::string& command){engine->ExecuteClientCmd(0,command.c_str(),true);});
++        // Preserve the upstream offline-Steam +playdemo fallback in live mode.
++        if (demoPath && !playing && std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now()-startTime).count()>=8) {
++            const std::string command="playdemo \""+std::string(demoPath)+"\"";
++            demoPath=nullptr;
++            engine->ExecuteClientCmd(0,command.c_str(),true);
++        }
++        originalFrameStageNotify(thisptr,stage);
+         return;
+     }
+ 
+@@ -753,7 +818,13 @@
+     ConVar_Register();
+     Log("CS2_MVP_ENVIRONMENT_ABI 1");
+ 
+-    wsConnectionThread = new std::thread(ConnectToWebsocketServerLoop);
++    if (liveController.Enabled()) {
++        liveController.SetSceneBackend(cs2_live::ReadSource2SceneCvar,cs2_live::WriteSource2SceneCvar);
++        liveController.Start();
++        Log("CS2_CAMERA_LIVE_ABI 1");
++    } else {
++        wsConnectionThread = new std::thread(ConnectToWebsocketServerLoop);
++    }
+ 
+     RestoreGameinfoFile();
+ 
+@@ -765,6 +836,11 @@
+ {
+     isQuitting = true;
+     RequireRestoreCaptureEnvironment("shutdown");
++    try {liveController.RestoreScene();}catch(const std::exception& error){Log("CS2_CAMERA_SCENE_RESTORE_ERROR %s",error.what());}
++    try {liveController.RestoreCosmetics();}catch(const std::exception& error){Log("CS2_CAMERA_COSMETICS_RESTORE_ERROR %s",error.what());}
++    try {liveController.RestorePresentation();}catch(const std::exception& error){Log("CS2_CAMERA_PRESENTATION_RESTORE_ERROR %s",error.what());}
++    if(!hudPresentation.Remove())Log("CS2_CAMERA_PRESENTATION_RESTORE_ERROR HUD callsites could not be restored");
++    liveController.Stop();
+     if (!viewPatch.Remove()) Log("CS2_MVP_CAMERA_ERROR could not restore main-view code");
+ 
+     if (serverConfigShutdown != NULL) {
