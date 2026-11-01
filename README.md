@@ -1,341 +1,72 @@
-# CS2 Camera Studio 0.1.15 — Linux adapters
+# CS2 Camera Studio
 
-This candidate adds validated client profiles for Steam build **26334290**
-(CS2 **1.41.9.4**), Vulkan lens finishing and editable Follow drafts from real
-recorded player motion. Lens settings persist in projects and use the same
-algorithm during export. Follow drafts are available from **Follow from demo**
-in the launcher, the `follow-draft` command and MCP `cs2_demo_follow_draft`.
+Редактор камер для демозаписей CS2 на Linux. Открываешь демку, ставишь ключи
+прямо в игре, настраиваешь движение и FOV, смотришь пролёт и сохраняешь видео.
 
-Follow is a recorded-motion draft: check the route, geometry and visibility
-before applying it. Depth diagnostics are opt-in and passive; depth capture,
-depth-based DOF and relighting remain unavailable. The new adapters have offline,
-native, Qt and synthetic Vulkan coverage; this candidate still needs a complete
-new live-demo capture and audio check. See [verification and limitations](docs/review-0.1.15.md).
+## Запуск
 
-Runtime writable state defaults to the user's data directory instead of the
-Steam library. This avoids the observed NTFS symlink failure while keeping
-Steam's own runtime scripts unchanged. `PRESSURE_VESSEL_VARIABLE_DIR` remains
-available as an explicit override.
+Нужны Linux x86_64, установленная CS2, Steam Linux Runtime sniper,
+запущенный Steam, FFmpeg и ffprobe.
 
-## Included editing and export workflow
-
-This local update adds reusable export profiles and recent-export settings,
-stable multi-key selection and group retiming, and searchable saved projects.
-It also fixes queued native commands that could execute after a client timeout,
-Unicode project restoration and Escape during active export.
-
-- **Export:** save a named profile, restore the last settings, or use settings
-  from recent exports. Profiles do not change your destination or current
-  composition/region. History distinguishes completed, failed and cancelled jobs.
-- **Camera timeline:** Ctrl-click selects multiple linked keys; drag a marquee
-  in empty lanes or move selected keys together. Shift still bypasses snapping.
-  A group retime commits once and is undone once; Escape cancels the draft.
-  Fit selection and previous/next key navigation use the current timeline.
-  Inspector edits and Delete continue to affect the primary key only.
-- **Projects (Ctrl+O):** search title, ID or demo filename, filter compatible
-  projects, and sort by recent use or name. Selection tracks the project ID;
-  a filtered or missing entry cannot be opened accidentally.
-
-The SourceMVM comparison, code-review scope and verification limits are in
-[the 0.1.14 review notes](docs/review-0.1.14.md). Its workflows informed these
-original implementations. Windows rendering effects were not silently enabled
-as Linux features.
-
-The package is a candidate until live CS2 behavior is verified on the current
-game build. Building an AppImage never launches or changes the installed game.
-
----
-
-# CS2 Camera Studio — Linux prototype
-
-## Live Camera Studio (Linux prototype)
-
-Новый режим: одна открытая сессия CS2 с `-insecure`, редактор камер внутри
-Vulkan-кадра игры и MCP, который редактирует тот же проект. Есть ключи,
-таймлайн, параметры камеры/FOV, пресеты Hold/Dolly/Orbit, кривые значений и
-Bezier timing, undo/redo и сохранение. Предпросмотр можно повторять без перезапуска.
-
-Одна нижняя область переключается между Demo и Camera. Demo охватывает всю
-запись с абсолютными тиками, раундами, убийствами и смертями выбранного игрока;
-Camera показывает время шота от его start tick, ключи и In/Out композиции.
-Переключение само по себе не перематывает демку и не меняет ключи.
-Рядом с Play доступны редактируемые поля: у демки — текущий тик и ограничение
-проигрывания In/Out, у камеры — позиция в шоте и Duration с Keep/Scale.
-Ctrl+O открывает недавние проекты из общей папки, Ctrl+S сохраняет текущую
-композицию, Ctrl+Shift+S создаёт отдельную копию вместе со всеми ключами и кривыми.
-
-В Camera инструменты **Timeline / Map / Curves** занимают одну область.
-Инспектор справа разделён на **Camera / Shot / Scene**.
-**Curves → Values** редактирует позицию XYZ, pitch/yaw/roll и FOV;
-пространственные «усики» доступны и на миникарте. **Smooth through key**
-согласует соседние участки для прохода через ключ без остановки. **Timeline**
-открывает дорожки позиции, поворота и FOV, масштабирование, перенос ключей,
-In/Out и изменение длины шота с сохранением или растяжением времени ключей.
-В **Settings** выбирают секунды/тики/кадры, snap, высоту таймлайна, масштаб,
-прозрачность и blur. Настройки интерфейса сохраняются отдельно от проекта.
-
-**Camera → Map** открывает миникарту маршрута. Ключи и
-текущую камеру можно перетаскивать по XY с сохранением Z; колесо меняет масштаб,
-средняя кнопка перемещает план, Escape отменяет перенос. **Check 3D path**
-проверяет текущую кривую по индексированной физической геометрии и показывает
-найденное препятствие. План сверху не доказывает свободный проход по высоте.
-MCP проверяет пространственные изменения до применения; пересечения и
-неполное покрытие препятствий отклоняются, исходный проект сохраняется.
-Движущиеся предметы, двери и стекло ещё требуют адаптеров состояния демки:
-текущие индексы не дают полной гарантии. [Индексирование карт](docs/map-geometry.md).
-
-Кандидат 0.1.15: [AppImage в Releases](https://github.com/p01ntov/HLAE_Linux_MCP/releases/tag/v0.1.15)
-(после локальной сборки — `outputs/CS2-Camera-Studio-x86_64.AppImage`). Запустить,
-выбрать локальную `.dem`, оставить Fullscreen Windowed и открыть редактор.
-F6 — ключ, F7 — свободная/фиксированная камера, F8 — интерфейс, F9 — предпросмотр.
-F10 открывает отдельную перемещаемую панель хоткеев. ЛКМ выделяет число для
-замены; средняя кнопка с движением меняет его шагом 1 (Ctrl: 0,1; Shift: 10).
-Есть Gaussian-блюр и затемнение фона. Ввод не запускает команды редактора.
-**Safe exit** в нижней панели сохраняет проект, закрывает сессию редактора и
-восстанавливает исходные видеонастройки CS2, включая режим окна и разрешение.
-Ошибка сохранения оставляет сессию открытой; **Hide** только скрывает редактор.
-
-Из исходников: `.venv/bin/python -m cs2_mvp.live --demo /absolute/match.dem`.
-MCP: тот же AppImage с аргументом `--mcp`; конфиги подключения лежат в
-`packaging/live/`. [Инструкция, сборка и ограничения](docs/live-editor.md).
-В AppImage есть отдельные команды `render`/`finish`: сохранённый проект
-редактора можно записать до 1000 FPS. Режим Composition пишет всю композицию,
-Region — временной отрезок In/Out; I/O ставят его границы на таймлайне.
-Сохранённый диапазон используется без ручного указания тиков, а
-`--render-scope composition|region` переопределяет его для одного рендера.
-[Захват и замедления](docs/high-fps-capture.md).
-Для After Effects в окне экспорта есть PNG sequence: все исходные кадры до
-1000 FPS сохраняются без потерь RGB, с проверкой каждого кадра и инструкцией
-импорта. Интерпретация 60 FPS даёт замедление в 16,67 раза без пропуска кадров.
-По умолчанию выбран QHD 2560×1440. В Custom можно ввести свои ширину и высоту;
-частоты захвата и воспроизведения задаются отдельно. Для MP4 доступны качество
-CRF или целевой средний битрейт, для lossless PNG битрейт не применяется.
-Builtin-каталог агентов берётся из установленной игры. Можно выбрать агента
-для точного SteamID с учётом T/CT и настроить командные цвета. Наблюдаемого
-игрока выбирают по нику в нижней панели или General → Player.
-В сборке 0.1.2 удалены замены оружейных скинов, перчаток и глобальные
-appearance-паки; старые запросы для них дают явную ошибку. Подмена ножей пока
-недоступна. [Текущие возможности](docs/live-editor.md).
-Существующий пакетный рендер ниже сохранён отдельно.
-
-Локальная цепочка **`.dem → диапазон тиков → POV игрока → MP4 со звуком`**.
-CS2 сама воспроизводит и записывает сцену; используется Linux-плагин
-[CS Demo Manager](https://github.com/akiver/cs-demo-manager), затем FFmpeg
-кодирует TGA/WAV в H.264/AAC. Собственный захват Vulkan и HLAE не требуются.
-Для кинематографической камеры используется локальное расширение плагина:
-оно меняет итоговый `CViewSetup` после расчёта камеры наблюдателя.
-
-## Установка
-
-Нужны нативная CS2, установленный Steam Linux Runtime sniper, запущенный Steam,
-графическая сессия с `DISPLAY`, Python 3.11+, FFmpeg и ffprobe.
+Скачай [AppImage 0.1.15](https://github.com/p01ntov/HLAE_Linux_MCP/releases/tag/v0.1.15)
+и запусти:
 
 ```sh
-python3 -m venv .venv
-.venv/bin/python -m pip install -e .
-.venv/bin/cs2-mvp doctor
-.venv/bin/cs2-mvp bootstrap
+chmod +x CS2-Camera-Studio-x86_64.AppImage
+./CS2-Camera-Studio-x86_64.AppImage
 ```
 
-`bootstrap` скачивает только Linux-библиотеку плагина, закреплённую на коммите
-`7270bc95c8cab87b7f9ddd490fea13c6eda3ace7`, проверяет SHA-256 и сохраняет MIT LICENSE.
-Полное приложение CS Demo Manager и PostgreSQL для этой цепочки не нужны.
+Перед запуском закрой обычную CS2. Выбери локальный файл `.dem` и нажми
+**Open Demo + Editor**. Приложение откроет демку с `-insecure`.
+**Safe exit** сохранит проект, закроет сессию и восстановит видеонастройки игры.
 
-## Использование
+Если AppImage не запускается из-за FUSE, используй:
 
 ```sh
-.venv/bin/cs2-mvp inspect /absolute/path/match.dem --kills
-.venv/bin/cs2-mvp render /absolute/path/match.dem \
-  --player 'Exact nickname or SteamID64' --start 79863 --end 80503 \
-  --width 1280 --height 720 --fps 30 --output outputs/clip.mp4 --dry-run
+APPIMAGE_EXTRACT_AND_RUN=1 ./CS2-Camera-Studio-x86_64.AppImage
 ```
 
-Убрать `--dry-run` для записи. Игра должна быть закрыта перед запуском.
-`--game-dir` позволяет явно указать каталог `<install>/game`.
-`--keep-raw` сохраняет исходные TGA/WAV для диагностики; при ошибке они
-сохраняются всегда. Существующий MP4 не перезаписывается.
+## Что умеет
 
-## Кинематографическая камера
+- Строить пролёты по ключам, редактировать кривые движения и FOV, отменять правки.
+- Двигать несколько ключей сразу, сохранять проекты и находить их через поиск.
+- Добавлять искажение объектива, виньетку и хроматическую аберрацию.
+- Делать Follow-черновики по записанному движению игрока, которые потом можно править вручную.
+- Экспортировать MP4 со звуком или PNG-последовательность с захватом до 1000 FPS.
+  Настройки экспорта можно сохранять в пресеты.
 
-Эпизод с Zeus на новой демке: `examples/camera-nuke-main-zeus-human.json`.
-Это низкая камера со стороны Main внутри открытого зала A: плавное ведение
-за `cat :3`, затем небольшой подъезд и сужение FOV с 56 до 49. Опорные
-повороты поставлены по заранее разобранным позициям игроков, с небольшим
-запаздыванием; привязки к игроку при воспроизведении нет.
+Основные клавиши: F6 добавляет ключ, F7 переключает свободную и фиксированную
+камеру, F8 скрывает интерфейс, F9 запускает предпросмотр. F10 открывает подсказки.
+
+## MCP
+
+Сначала открой демку в редакторе. Для подключения AI-клиента укажи в его
+настройках тот же AppImage с аргументом `--mcp`:
 
 ```sh
-.venv/bin/cs2-mvp render /absolute/path/match.dem \
-  --camera examples/camera-nuke-main-zeus-human.json --start 89624 --end 89768 \
-  --width 1920 --height 1080 --fps 60 --output outputs/main-zeus.mp4
+./CS2-Camera-Studio-x86_64.AppImage --mcp
 ```
 
-`--camera` принимает статичный кадр, путь, орбиту или независимые ключи позиции
-и ориентации. `examples/camera-ct-flyby.json` содержит только **две мировые точки
-XYZ и два ключа поворота**, без координат/идентификатора игрока. Перемещение
-использует `smootherstep`, поворот — `smoothstep`. Промежуточные позы вычисляются
-при экспорте. `examples/camera-ct-pan.json` оставляет XYZ неподвижным и меняет
-только поворот. Камера не прикрепляется к персонажу.
+[Примеры настройки](packaging/live/) и [инструкция для агента](docs/mcp-agent-guide.md).
 
-`position_keys` и `rotation_keys` имеют свои времена в секундах от начала
-отрезка и отдельные easing. Повороты задаются как `angles:[pitch,yaw,roll]` в
-градусах либо `quaternion:[x,y,z,w]`, интерполируются по короткой дуге SLERP.
-Единственный ключ удерживает значение. Несколько ключей должны покрывать
-отрезок. Для двух ключей easing применяется к полному движению.
+## Пока не готово
 
-`position_interpolation: "hermite"` с `position_easing: "linear"` задаёт
-кривую через редкие опорные точки с непрерывной скоростью на стыках.
-Камера плавно стартует и останавливается только в начале и конце пути.
-Здесь `linear` относится ко времени: само движение задаётся кубической кривой.
-Кривая может выйти за пределы опорных точек, поэтому высота проверяется на всех
-экспортных кадрах, а препятствия — по рендеру.
+0.1.15 выпущена как предварительная сборка. Привязки проверены для
+CS2 1.41.9.4, Steam build 26334290. После обновления игры может понадобиться
+новая версия адаптеров.
 
-`fov: 105` задаёт постоянный FOV через итоговую камеру движка (допустимо 30..140).
-Без этого поля сохраняется игровой FOV. Это значение в `CViewSetup`; итоговый
-угол проекции зависит от формата кадра. Вариант
-`examples/camera-ct-wide-interest.json` увеличивает FOV с 90 до 105 и задаёт
-мировую `point_of_interest`. По ней рассчитываются повороты только в опорных
-точках позиции, затем между ними применяется SLERP с easing. Дополнительных
-точек и привязки к игроку нет. `point_of_interest` и `rotation_keys` взаимоисключающие.
+Follow выдаёт черновик: траекторию и видимость игрока нужно проверить в игре.
+Захват глубины, DOF на её основе и relighting пока недоступны.
+Полную запись демки со звуком на новой сборке ещё не проверяли.
 
-Для постановки «CT → попадание по T → удержание места попадания» есть
-`examples/camera-ct-hit-t-hold.json`: три ключа XYZ и три ключа поворота.
-Перевод взгляда начинается на 3-й секунде (тик 80283); с 3.875 с до конца
-шестисекундного отрезка положение и поворот удерживаются. `hold_last: true`
-разрешает такой хвост без добавления дублирующей четвёртой точки. Координаты
-целей в `shot_markers` — пояснения к постановке, а не привязки к игрокам.
+## Документация и сборка
 
-Крупный вариант `examples/camera-ct-hit-t-close.json` держит FOV 35 до попадания,
-затем плавно расширяет его до 45. Дорожка `fov_keys:[{time,fov}]` имеет отдельный
-`fov_easing`, взаимно исключается с постоянным `fov` и использует `hold_last`
-для удержания конечного значения. Три позиции сохранены; добавлен один ключ
-поворота на середине прыжка для кадрирования при узком объективе. Привязки к
-траектории персонажа при воспроизведении нет.
+- [Работа в редакторе и сборка из исходников](docs/live-editor.md)
+- [Экспорт, высокая частота кадров и замедления](docs/high-fps-capture.md)
+- [Геометрия карты и проверка маршрута](docs/map-geometry.md)
+- [Пакетный рендер и устройство плагина](docs/csdm-backend.md)
+- [Изменения и ограничения 0.1.15](docs/review-0.1.15.md), [результаты проверок](docs/verification-0.1.15.json)
 
-`examples/camera-ct-hit-t-cinematic-push.json` сохраняет то же начало до
-попадания, оставляет FOV 35 на всём отрезке и завершает кадр подъездом к
-погибшему T. После перевода камеры на 3.875 с отдельный плавный подъезд
-заканчивается на 6 с; до 7 с камера неподвижна. Это четыре ключа позиции
-и пять независимых ключей поворота. Камера остаётся над двором Nuke
-(`floor_z: -408`, минимальная высота над этой плоскостью — 288 единиц).
-Плоскость проверяет высоту; препятствия проверяются просмотром рендера.
-
-Более подвижная постановка `examples/camera-ct-playful-safe.json` использует
-пять опорных позиций: дуга вокруг CT, раскрытие пары на выстреле, затем подъезд
-к погибшему T. Небольшой roll меняет наклон кадра; FOV остаётся 35.
-На тике 80283 композиция рассчитана по объёмам обеих фигур с отступом 10%
-от краёв. CT крупнее и занимает левую треть, T — правую часть кадра.
-Это проверка приближённых объёмов, а не обещание видимости мешей сквозь стены.
-Координаты актёров использовались при постановке, при воспроизведении привязки нет.
-
-```sh
-.venv/bin/cs2-mvp render /absolute/path/match.dem \
-  --camera examples/camera-ct-hit-t-cinematic-push.json --start 80091 --end 80539 \
-  --width 1920 --height 1080 --fps 60 --output outputs/cinematic-push.mp4
-```
-
-```sh
-.venv/bin/cs2-mvp render /absolute/path/match.dem \
-  --camera examples/camera-ct-flyby.json --start 80091 --end 80292 \
-  --width 1280 --height 720 --fps 60 --output outputs/flyby.mp4
-```
-
-Для двух моделей есть отдельный геометрический расчёт: первая крупнее и ближе,
-вторая дальше, камера выше обеих. Вход — мировые AABB `min/max`, горизонтальный
-FOV, формат кадра и запас по краям. Выход — обычный статичный camera JSON с
-отчётом о проекции всех углов габаритов. Расчёт не проверяет стены/перекрытия и
-не устанавливает объектив игры; `horizontal_fov` должен соответствовать реальной
-проекции, а не условному FOV для формата 4:3. Модели разных размеров могут иметь
-другое соотношение размера на экране; отчёт возвращает фактическое значение.
-
-```sh
-.venv/bin/cs2-mvp compose examples/composition-pair.json --output pair-camera.json
-```
-
-Текущая проверенная Linux-сборка `libclient.so` имеет GNU build-ID
-`f1e04e3616921a3bb25940eea9b4b6bfd7ccada5` (Steam build 26087496).
-Для камеры также сохранены отдельные guards предыдущей сборки
-`d5bacd2f5df4a3a68fa8bee8692337993548e14a` (25966348); cosmetics требуют текущую F1.
-Камера проверяет build-ID и инструкции перед подключением и отклоняет
-неподдерживаемые сборки. Даже статичные
-кадры используют этот механизм: разовый `spec_goto` игра сбрасывает.
-Камера по умолчанию записывается при `max(120, fps)`; поддерживаются
-15–1000 FPS и отдельный `--capture-fps`. Кодирование сохраняет обычную длительность
-и скорость аудио. Для замедления исходную последовательность кадров нужно
-интерпретировать с меньшей частотой; `--keep-raw` сохраняет все отсчёты. Проверяются отдельно счётчик поз и число
-реальных записей итоговой камеры. Размещение проверяется просмотром видео.
-
-Игрок выбирается по точному нику или SteamID64. Парсер сопоставляет его со
-слотом `user_id + 1` на всём отрезке от подготовки до конца записи. Сначала выполняется
-seek, затем `spec_mode 1` / `spec_player`, затем запись. Данные оригинального
-`.dem` и его sidecar не меняются: для задания создаётся отдельная ссылка.
-
-## Что сохраняется и проверяется
-
-Каждое задание находится в `.runs/<id>/`: параметры и версии в `manifest.json`,
-команды в `input.dem.json`, журнал `game.log`, журнал FFmpeg и резервные копии
-игровых конфигов. Плагин подключается временно через `gameinfo.gi`.
-Исходный файл восстанавливается после завершения игры с проверкой хешей;
-пользовательские дополнения не удаляются. Внешние изменения `gameinfo.gi`
-сохраняются как конфликт, требующий восстановления.
-
-Результат публикуется после проверки отдельного журнала плагина
-`game/bin/linuxsteamrt64/csdm.log`, логов выполнения `startmovie`/`endmovie`,
-непрерывности кадров, длительности, разрешения, аудиодорожки и полного
-декодирования MP4. Тики выполнения команд фиксируются отдельно от запрошенных.
-При 30 FPS между кадрами проходит примерно 2.13 demo ticks: совпадение с
-произвольным тиком до доли кадра не гарантируется. Для CS2 пока используется
-шкала 64 тика/с. POV после смерти подчиняется поведению самой игры.
-
-При сбое кодирования готовый захват можно собрать повторно без запуска игры:
-
-```sh
-.venv/bin/cs2-mvp finalize .runs/<job-id>
-```
-
-## Ограничения MVP
-
-- Проверяется конкретная установленная сборка CS2. Обновления могут сломать
-  плагин или воспроизведение старых демок.
-- Для корректной подготовки требуется `start >= 193`. Ранние тики, matte/depth,
-  отдельные слои и проверки столкновений пока не реализованы.
-- TGA занимают много места. Объём оценивается до запуска, свободное место
-  контролируется во время записи. Удаляются только файлы с префиксом задания.
-- Запуск только локального демо с `-insecure`; один рендер на установку игры.
-- При обычной отмене игра останавливается и файлы восстанавливаются. После
-  отключения питания или SIGKILL сохраняются recovery-файлы рядом с
-  `gameinfo.gi`; восстановление описано в [документации backend](docs/csdm-backend.md).
-- MCP-интерфейс будет использовать эти же операции после сквозной проверки
-  записи; сервер в этой первой версии ещё не подключён.
-
-## Проверки
-
-```sh
-.venv/bin/python -m unittest discover -s tests -v
-```
-
-Результаты кандидата 0.1.15: **474 Python-теста**, 24 нативных набора,
-ImGui/SDL, Vulkan lens на RTX 4060 и llvmpipe; **107 проверок AppImage**,
-32 упакованных Python-модуля совпадают с исходниками.
-[Машиночитаемый отчёт](docs/verification-0.1.15.json).
-
-Если checkout лежит на NTFS без поддержки symlink, сборочный каталог можно
-поместить в tmpfs приватного user/mount namespace. Нужны util-linux и разрешённые
-непривилегированные user namespaces. Файлы Steam не меняются, итоговый AppImage
-записывается в обычную папку `outputs`, временный mount исчезает при выходе:
-
-```sh
-.venv/bin/python tools/linux_staging.py --mount "$PWD/.cache/live-appimage" -- \
-  .venv/bin/python tools/build_live_appimage.py
-```
-
-Для тестов на такой файловой системе аналогично задайте временный Linux-каталог:
-
-```sh
-.venv/bin/python tools/linux_staging.py --mount "$PWD/.cache/test-tmp" -- \
-  env TMPDIR="$PWD/.cache/test-tmp" QT_QPA_PLATFORM=offscreen PYTHONPATH=src \
-  .venv/bin/python -m unittest discover -s tests
-```
-
-Технические источники: [CSDM video](https://cs-demo-manager.com/docs/guides/video),
-[CSDM plugin](https://cs-demo-manager.com/docs/development/cs-server-plugin),
-[demoparser2](https://github.com/LaihoE/demoparser).
+В основе записи лежит плагин [CS Demo Manager](https://github.com/akiver/cs-demo-manager).
+Игра и Steam в комплект не входят. Лицензии зависимостей собраны
+[отдельно](packaging/licenses/NOTICE.md).
