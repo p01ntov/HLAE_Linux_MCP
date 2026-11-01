@@ -36,6 +36,22 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def steam_runtime_environment(environment: dict[str, str]) -> dict[str, str]:
+    """Keep mutable runtime files in user data, away from game-library NTFS.
+
+    Sniper needs Linux symlink semantics when preparing its writable runtime.
+    An explicit pressure-vessel override remains authoritative. The stock
+    runtime creates this directory; no Steam installation file is patched.
+    """
+    result = environment.copy()
+    if not result.get("PRESSURE_VESSEL_VARIABLE_DIR"):
+        data = Path(result.get("XDG_DATA_HOME", ""))
+        if not data.is_absolute():
+            data = Path.home() / ".local/share"
+        result["PRESSURE_VESSEL_VARIABLE_DIR"] = str(data / "steam-runtime-sniper-var")
+    return result
+
+
 def external_environment() -> dict[str, str]:
     """Restore host library lookup for tools launched by a frozen app."""
     environment = os.environ.copy()

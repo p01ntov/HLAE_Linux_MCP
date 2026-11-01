@@ -5,6 +5,8 @@ message per line. Only protocol messages are written to stdout.
 """
 from __future__ import annotations
 
+from . import __version__
+
 import json
 import math
 from pathlib import Path
@@ -90,6 +92,11 @@ SCENE_FIELDS.update({name: {"type": "number", "minimum": bounds[0], "maximum": b
 SCENE_FIELDS["exposure"]["description"] = "Exposure scale override; 0 restores automatic exposure."
 SCENE_FIELDS["bloom_strength"]["description"] = "Bloom strength override; -1 restores automatic strength without resetting other scene settings. Requires available bloom_enabled and postprocess_enabled gates."
 SCENE = object_schema(SCENE_FIELDS)
+LENS_FIELDS = {"enabled": {"type": "boolean"},
+               "distortion": {"type": "number", "minimum": -.75, "maximum": .75},
+               "vignette": {"type": "number", "minimum": 0, "maximum": 1},
+               "chromatic": {"type": "number", "minimum": 0, "maximum": 8}}
+LENS = object_schema(LENS_FIELDS)
 STEAM_ID = {"type": "string", "minLength": 1, "maxLength": 20, "pattern": r"^[1-9][0-9]{0,19}$",
             "format": "steamid64", "description": "Exact nonzero decimal uint64 SteamID64, without leading zeroes; read current players from get_state.cosmetics.players."}
 PLAYER_COSMETICS_FIELDS = {"steam_id": STEAM_ID,
@@ -113,6 +120,7 @@ PROJECT = {**object_schema({"name": {"type": "string", "maxLength": 256},
                          **INTERPOLATION_FIELDS,
                          "render_range": RENDER_RANGE,
                          "scene": SCENE,
+                         "lens": LENS,
                          "cosmetics": COSMETICS,
                          "presentation": PRESENTATION,
                          "keys": {"type": "array", "items": object_schema(KEY_FIELDS, ("id", "time", "position", "angles")), "maxItems": 4096}}, ("keys",)), "format": "camera-project"}
@@ -178,6 +186,8 @@ TOOLS = [
     tool("set_scene", "Apply whitelisted scene effects to the running -insecure demo. First read get_state.scene_capabilities: only available=true controls may be changed, and runtime bounds/types are authoritative. Native code validates and reads back stored engine values; successful readback does not verify the rendered effect. DOF planes require near_blurry<=near_crisp<=far_crisp<=far_blurry and dof_override=true for explicit focus. When available, enable depth_of_field in the same batch; a missing renderer toggle leaves rendering unverified without forbidding available focus controls. Bloom depends on available bloom_enabled and postprocess_enabled gates; changing bloom_strength alone does not enable them. Bloom strength -1 and exposure 0 restore their automatic modes independently. Combat switches control spectator X-ray, blood enablement and metal-impact sparks only; blood amount and spark count/spread are unavailable. Saved as static project.scene settings with undo/redo; scene effects are not camera-keyframe tracks. This is not a skin/model/material API. A gray-map material override is unavailable.",
          {"settings": SCENE}, ("settings",)),
     tool("reset_scene", "Restore this session's original engine values for scene effects and clear project.scene overrides. This does not reset camera keys."),
+    tool("set_lens", "Set color-only Vulkan lens finishing in a local demo: radial barrel/pincushion distortion, vignette and chromatic separation. Read lens_runtime.available before enabling. No depth, bokeh or fisheye projection is implied. Settings persist in project.lens with undo and identical export postprocessing.", {"settings": LENS}, ("settings",)),
+    tool("reset_lens", "Disable and clear project lens finishing without changing camera keys."),
     tool("request_export", "Ask this session's desktop launcher to open the MP4 / lossless PNG-sequence export window, with native sampling up to 1000 FPS. With a terminal-only launcher, use its Export UI through the desktop app; this request alone does not start a render."),
     tool("inspect_entities", "Read bounded native actor/entity evidence from the local demo: validated build/profile, class/team and available player identities. No raw addresses or mutation are exposed. For cosmetics, also inspect get_state.cosmetics.players and category capabilities before editing.",
          {"limit": {"type": "integer", "minimum": 1, "maximum": 64, "default": 64}}, read_only=True),
@@ -204,7 +214,10 @@ def demo_tool(method, description, properties, required=()):
     return definition
 
 
+from .follow_schema import FOLLOW_OPTIONS_SCHEMA
+
 TOOLS += [
+    demo_tool("follow_draft", "Bake measured player motion into an editable camera draft on the demo clock. Modes look_at/attach/lock_on, exact SteamID64, at most 30 seconds. Death/missing/teleport rejects or truncates explicitly. This is recorded motion, not runtime bone tracking. Returns unverified geometry; apply only via import_project with the mandatory geometry guard and visual validation.", {"player": STEAM_ID, "start_tick": TICK, "end_tick": TICK, "options": FOLLOW_OPTIONS_SCHEMA}, ("player", "start_tick", "end_tick")),
     demo_tool("inspect", "Read local CS2 demo header, players, actual round-start ticks and weapon IDs. No game is launched. Event bounds are not demo duration. Read cs2-camera://guides/agent before directing.", {}),
     demo_tool("find_moments", "Find actual player_death evidence by player, weapon, headshot, round and tick/time interval. min_kills>1 groups the same attacker and round within window_seconds. Counts only events matching every filter; does not infer clutches or visibility. Defaults exclude warmup and non-enemy deaths. Seconds are absolute demo tick/64, not round clock. End search bound is exclusive. Results are chronological and paginated.",
               {"player": PLAYER, "role": {"type": "string", "enum": ["attacker", "victim", "either"], "default": "attacker"},
@@ -304,6 +317,8 @@ def reject_removed_cosmetics(project):
 
 
 def _project_cosmetics_preflight(project):
+    if "lens" in project:
+        validate(project["lens"], LENS, "project.lens")
     reject_removed_cosmetics(project)
     if "cosmetics" not in project:
         return
@@ -350,6 +365,9 @@ def call_tool(client: NativeClient, name: str, arguments: dict):
             if not path:
                 raise LiveError("No active session demo; pass an explicit demo path")
         method = name.removeprefix("cs2_demo_")
+        if method == "follow_draft":
+            from .follow_camera import bake_demo_follow
+            return bake_demo_follow(path, **query)
         if method == "inspect":
             return demo_analysis.inspect(path)
         if method == "player_positions":
@@ -417,7 +435,7 @@ class Server:
                 self.initialized = True
                 result = {"protocolVersion": version if version in SUPPORTED_PROTOCOLS else PROTOCOL_VERSION,
                           "capabilities": {"tools": {"listChanged": False}, "resources": {"subscribe": False, "listChanged": False}},
-                          "serverInfo": {"name": "cs2-camera-studio", "version": "0.1.14"},
+                          "serverInfo": {"name": "cs2-camera-studio", "version": __version__},
                           "instructions": "Read resource cs2-camera://guides/agent first for the evidence-to-camera workflow. Offline cs2_demo_* tools inspect local .dem files and find real event ticks without launching CS2; pass demo or use the active launcher demo. Never invent kills, ticks, player positions or supported scene effects. Camera tools connect to an already running local CS2 -insecure demo session; read get_state hook health and map_status before editing. Mandatory 3D geometry preflight rejects spatial edits when collision coverage is incomplete; static_clear is not permission when complete=false. validate_camera_path diagnoses real indexed geometry without changing state. Never bypass a rejection by another native/console channel. Collision diagnostics do not verify rendered visibility or full frustum. Shared project edits support in-game history; MCP undo/redo is unavailable until target history can be checked. No online play or arbitrary engine commands."}
             elif method == "ping":
                 result = {}

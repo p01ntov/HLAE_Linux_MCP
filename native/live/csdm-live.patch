@@ -11,12 +11,15 @@
  #ifdef _WIN32
  #define SERVER_LIB_PATH "\\csgo\\bin\\win64\\server.dll"
  #else
-@@ -96,6 +100,21 @@
+@@ -96,6 +100,24 @@
  cs2_mvp::LinuxViewPatch viewPatch;
  cs2_mvp::CaptureEnvironment captureEnvironment;
  bool captureEnvironmentBound=false;
 +cs2_live::Controller liveController;
 +cs2_live::LinuxHudPresentation hudPresentation;
++extern "C" __attribute__((visibility("default"))) void cs2_live_lens_status_json(const char* value) {
++    liveController.LensStatusText(value);
++}
 +
 +extern "C" __attribute__((visibility("default"))) const char* cs2_live_state_json() {
 +    static thread_local std::string state; state=liveController.StateJson(); return state.c_str();

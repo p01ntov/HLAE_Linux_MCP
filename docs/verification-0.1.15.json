@@ -1,0 +1,111 @@
+{
+  "version": "0.1.15",
+  "release_status": "prerelease",
+  "verified_at": "2026-11-01T16:38:02.527634+00:00",
+  "python": {
+    "tests": 474,
+    "passed": true,
+    "skipped": 0,
+    "temporary_filesystem": "Linux tmpfs in private user/mount namespace"
+  },
+  "native": {
+    "isolated_cpp_suites": 24,
+    "checks": [
+      {
+        "name": "native_controller_and_adapters",
+        "passed": true,
+        "details": "24 isolated C++ suites plus hostile symbol interposition"
+      },
+      {
+        "name": "motion_track",
+        "passed": true,
+        "details": "motion ABI frame sequencing"
+      },
+      {
+        "name": "depth_provenance_and_wrappers",
+        "passed": true,
+        "details": "ASan+UBSan; model, original-call forwarding unset/enabled, forced allocation failure"
+      },
+      {
+        "name": "production_overlay_dispatch",
+        "passed": true,
+        "details": "probe unset/enabled; loader-data initialization, failed allocations, GIPA/GDPA, missing-extension gates, disconnected/demo lens gates"
+      },
+      {
+        "name": "lens_glsl_spirv",
+        "passed": true,
+        "details": "generated shader header matches validated GLSL"
+      },
+      {
+        "name": "lens_vulkan_llvmpipe",
+        "passed": true,
+        "details": "120 pixel cases, four SDR formats, max byte error 1; zero validation errors"
+      },
+      {
+        "name": "lens_vulkan_nvidia",
+        "passed": true,
+        "details": "RTX 4060; 120 pixel cases, four SDR formats, max byte error 1; zero validation errors"
+      },
+      {
+        "name": "blur_vulkan",
+        "passed": true,
+        "details": "SDR decode/kernel/UV/per-image reuse/teardown"
+      },
+      {
+        "name": "capture_vulkan",
+        "passed": true,
+        "details": "post-render GPU pixels, BGRA/orientation, same-frame metadata"
+      },
+      {
+        "name": "imgui_editor",
+        "passed": true,
+        "details": "numeric commits, undo, shortcuts and independent panel"
+      },
+      {
+        "name": "imgui_timeline",
+        "passed": true,
+        "details": "multiselection/group-retime/CAS/fit/cancel/layout"
+      },
+      {
+        "name": "imgui_tool_surfaces",
+        "passed": true,
+        "details": "child ownership, popups, numeric commits and gesture cancellation"
+      },
+      {
+        "name": "overlay_resolver",
+        "passed": true,
+        "details": "libc/SDL scope and preserved RTLD_NEXT origin"
+      },
+      {
+        "name": "overlay_sdl_bridge",
+        "passed": true,
+        "details": "fake SDL no desktop window/input; cached keys and fullscreen opt-out/readback"
+      },
+      {
+        "name": "profile_parser",
+        "passed": true,
+        "details": "5 ELF parser/malformed input/static profile tests; no target binary analysis"
+      },
+      {
+        "name": "diff_whitespace",
+        "passed": true,
+        "details": "pass"
+      }
+    ]
+  },
+  "package": {
+    "checks": 107,
+    "passed": true,
+    "python_modules_matching_source": 32,
+    "sha256": "ec1b1f2d619e27814bb73981eb3c4708ec54e983bf9dc36d10f64c59c222ab09",
+    "plugin_sha256": "07229185c16b013ec885ed534f395a96fba5db5f9fbfbad0c66fed5dad1b61b9",
+    "overlay_sha256": "6d21d3424b44dbf2a84ebbd7b68f5296db79f2ea823104e7108e3de099a8941d",
+    "capture_plugin_sha256": "f2afdc0850663521fef1d606c39e9d048c5bc764485c751a8f603653fbc40a3d"
+  },
+  "limits": [
+    "No fresh end-to-end live-demo capture or audio validation in this continuation",
+    "Follow output requires geometry and visual validation",
+    "Depth diagnostic only; depth capture, depth-based DOF and relighting unavailable",
+    "Other Linux distributions/drivers not validated"
+  ]
+}

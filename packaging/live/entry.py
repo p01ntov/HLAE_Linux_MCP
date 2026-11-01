@@ -3,6 +3,9 @@ import sys
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "follow-draft":
+        from cs2_mvp.follow_cli import main as follow_main
+        return follow_main(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] == "index-maps":
         from cs2_mvp.map_geometry import main as index_main
         return index_main(sys.argv[2:])

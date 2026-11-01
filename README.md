@@ -1,4 +1,23 @@
-# CS2 Camera Studio 0.1.14 — editing and export workflow
+# CS2 Camera Studio 0.1.15 — Linux adapters
+
+This candidate adds validated client profiles for Steam build **26334290**
+(CS2 **1.41.9.4**), Vulkan lens finishing and editable Follow drafts from real
+recorded player motion. Lens settings persist in projects and use the same
+algorithm during export. Follow drafts are available from **Follow from demo**
+in the launcher, the `follow-draft` command and MCP `cs2_demo_follow_draft`.
+
+Follow is a recorded-motion draft: check the route, geometry and visibility
+before applying it. Depth diagnostics are opt-in and passive; depth capture,
+depth-based DOF and relighting remain unavailable. The new adapters have offline,
+native, Qt and synthetic Vulkan coverage; this candidate still needs a complete
+new live-demo capture and audio check. See [verification and limitations](docs/review-0.1.15.md).
+
+Runtime writable state defaults to the user's data directory instead of the
+Steam library. This avoids the observed NTFS symlink failure while keeping
+Steam's own runtime scripts unchanged. `PRESSURE_VESSEL_VARIABLE_DIR` remains
+available as an explicit override.
+
+## Included editing and export workflow
 
 This local update adds reusable export profiles and recent-export settings,
 stable multi-key selection and group retiming, and searchable saved projects.
@@ -22,10 +41,8 @@ The SourceMVM comparison, code-review scope and verification limits are in
 original implementations. Windows rendering effects were not silently enabled
 as Linux features.
 
-The editable source and resulting AppImage for this pass live entirely under
-`/mnt/ssd/CodexWorks/CS2CameraStudio`; a local baseline commit is retained for
-review. The package is a candidate until live CS2 behavior is verified on the
-current game build.
+The package is a candidate until live CS2 behavior is verified on the current
+game build. Building an AppImage never launches or changes the installed game.
 
 ---
 
@@ -67,7 +84,7 @@ MCP проверяет пространственные изменения до 
 Движущиеся предметы, двери и стекло ещё требуют адаптеров состояния демки:
 текущие индексы не дают полной гарантии. [Индексирование карт](docs/map-geometry.md).
 
-Готовый клиент: [AppImage в Releases](https://github.com/p01ntov/HLAE_Linux_MCP/releases/latest)
+Кандидат 0.1.15: [AppImage в Releases](https://github.com/p01ntov/HLAE_Linux_MCP/releases/tag/v0.1.15)
 (после локальной сборки — `outputs/CS2-Camera-Studio-x86_64.AppImage`). Запустить,
 выбрать локальную `.dem`, оставить Fullscreen Windowed и открыть редактор.
 F6 — ключ, F7 — свободная/фиксированная камера, F8 — интерфейс, F9 — предпросмотр.
@@ -294,6 +311,29 @@ seek, затем `spec_mode 1` / `spec_player`, затем запись. Дан�
 
 ```sh
 .venv/bin/python -m unittest discover -s tests -v
+```
+
+Результаты кандидата 0.1.15: **474 Python-теста**, 24 нативных набора,
+ImGui/SDL, Vulkan lens на RTX 4060 и llvmpipe; **107 проверок AppImage**,
+32 упакованных Python-модуля совпадают с исходниками.
+[Машиночитаемый отчёт](docs/verification-0.1.15.json).
+
+Если checkout лежит на NTFS без поддержки symlink, сборочный каталог можно
+поместить в tmpfs приватного user/mount namespace. Нужны util-linux и разрешённые
+непривилегированные user namespaces. Файлы Steam не меняются, итоговый AppImage
+записывается в обычную папку `outputs`, временный mount исчезает при выходе:
+
+```sh
+.venv/bin/python tools/linux_staging.py --mount "$PWD/.cache/live-appimage" -- \
+  .venv/bin/python tools/build_live_appimage.py
+```
+
+Для тестов на такой файловой системе аналогично задайте временный Linux-каталог:
+
+```sh
+.venv/bin/python tools/linux_staging.py --mount "$PWD/.cache/test-tmp" -- \
+  env TMPDIR="$PWD/.cache/test-tmp" QT_QPA_PLATFORM=offscreen PYTHONPATH=src \
+  .venv/bin/python -m unittest discover -s tests
 ```
 
 Технические источники: [CSDM video](https://cs-demo-manager.com/docs/guides/video),

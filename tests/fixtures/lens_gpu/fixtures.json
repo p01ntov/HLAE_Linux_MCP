@@ -1,0 +1,82 @@
+{
+  "version": 1,
+  "device": "NVIDIA GeForce RTX 4060",
+  "source": "disabled.ppm",
+  "width": 128,
+  "height": 72,
+  "format": "P6 RGB8 (readback from VK_FORMAT_R8G8B8A8_SRGB target)",
+  "fixtures": [
+    {
+      "file": "disabled.ppm",
+      "settings": {
+        "enabled": false,
+        "distortion": 0.6,
+        "vignette": 0.7,
+        "chromatic": 5
+      },
+      "sha256": "fb35fc46688b788dff218a99ccefa20f3b6d20ef2e54335b50f03cabf0bb76ad"
+    },
+    {
+      "file": "neutral.ppm",
+      "settings": {
+        "enabled": true,
+        "distortion": 0,
+        "vignette": 0,
+        "chromatic": 0
+      },
+      "sha256": "fb35fc46688b788dff218a99ccefa20f3b6d20ef2e54335b50f03cabf0bb76ad"
+    },
+    {
+      "file": "pincushion.ppm",
+      "settings": {
+        "enabled": true,
+        "distortion": -0.75,
+        "vignette": 0,
+        "chromatic": 0
+      },
+      "sha256": "9c19117629125521d9a507eda983f8a1521264ba132220346d3e885fb4cabc69"
+    },
+    {
+      "file": "barrel.ppm",
+      "settings": {
+        "enabled": true,
+        "distortion": 0.75,
+        "vignette": 0,
+        "chromatic": 0
+      },
+      "sha256": "a99b6ebfe7b152a7712ffb046f71567f20264afe9818389ba62828639bc6b67b"
+    },
+    {
+      "file": "vignette.ppm",
+      "settings": {
+        "enabled": true,
+        "distortion": 0,
+        "vignette": 0.85,
+        "chromatic": 0
+      },
+      "sha256": "503def724a14c1cc6e7d9315462e302e26b452c3836dc97e9db64b133c531420"
+    },
+    {
+      "file": "chromatic.ppm",
+      "settings": {
+        "enabled": true,
+        "distortion": 0,
+        "vignette": 0,
+        "chromatic": 8
+      },
+      "sha256": "53f9da46b6593487df535904d76c6aece8a798f92347d50945e4c7874b0b4571"
+    },
+    {
+      "file": "combined.ppm",
+      "settings": {
+        "enabled": true,
+        "distortion": -0.6,
+        "vignette": 0.4,
+        "chromatic": 4
+      },
+      "sha256": "4ab54b758aa90bb085656da3df4a218b86a58e6f3e9bab2db3d1745e52c5bb50"
+    }
+  ],
+  "generator": "native/live/tests/lens_effects_test.cpp; CS2_LENS_TEST_ARTIFACTS=<directory>",
+  "purpose": "Real Vulkan readback fixtures for offline linear-sRGB lens parity; allowed error <=2 steps, disabled/neutral exact."
+}

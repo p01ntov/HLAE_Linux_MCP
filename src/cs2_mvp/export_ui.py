@@ -49,7 +49,9 @@ def describe_export(project, options):
     frames = samples if preserve_samples else round(samples * options.fps / capture)
     if frames < 2:
         raise ValueError("The selected range produces fewer than two output frames")
-    storage = estimate_capture_storage(samples, options.width, options.height, options.export_format)
+    from .lens_effects import lens_active, validate_lens
+    storage = estimate_capture_storage(samples, options.width, options.height, options.export_format,
+                                       lens=lens_active(validate_lens(project.get("lens", {}))))
     return {"start_tick": start, "end_tick": end, "range": selected, "samples": samples,
             "frames": frames, "source_duration": (end-start)/64, "output_duration": frames/options.fps,
             "speed": options.fps/capture if preserve_samples else 1,

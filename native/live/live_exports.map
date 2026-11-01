@@ -5,6 +5,7 @@
         cs2_live_ui_state_json;
         cs2_live_map_preview_json;
         cs2_live_command_json;
+        cs2_live_lens_status_json;
     local:
         *;
 };

@@ -16,9 +16,11 @@ import platform
 import shutil
 import subprocess
 import sys
+import tomllib
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
+VERSION = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
 APPIMAGETOOL_VERSION = "1.9.1"
 APPIMAGETOOL_URL = f"https://github.com/AppImage/appimagetool/releases/download/{APPIMAGETOOL_VERSION}/appimagetool-x86_64.AppImage"
 APPIMAGETOOL_SHA256 = "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0"
@@ -208,7 +210,7 @@ def build(plugin: Path, overlay: Path, output: Path, *, appdir_only=False) -> Pa
     shutil.copy2(ROOT / "AGENTS.md", share)
     shutil.copy2(ROOT / "docs/map-geometry.md", share)
     shutil.copy2(ROOT / "docs/cinematic-effects-research.md", share)
-    shutil.copy2(ROOT / "docs/review-0.1.14.md", share)
+    shutil.copy2(ROOT / f"docs/review-{VERSION}.md", share)
     (share / "docs").mkdir()
     for document in ("mcp-agent-guide.md", "high-fps-capture.md", "map-geometry.md", "cinematic-effects-research.md"):
         shutil.copy2(ROOT / "docs" / document, share / "docs" / document)
@@ -222,7 +224,7 @@ def build(plugin: Path, overlay: Path, output: Path, *, appdir_only=False) -> Pa
     environment = dict(os.environ, ARCH="x86_64", APPIMAGE_EXTRACT_AND_RUN="1")
     run([appimagetool, "--no-appstream", appdir, output.resolve()], env=environment)
     output.chmod(0o755)
-    metadata = {"version": "0.1.14", "appimage": str(output.resolve()), "sha256": sha256(output),
+    metadata = {"version": VERSION, "appimage": str(output.resolve()), "sha256": sha256(output),
                 "plugin_sha256": sha256(plugin), "overlay_sha256": sha256(overlay),
                 "capture_plugin_sha256": sha256(capture_assets / "libcamera_capture.so"),
                 "stock_plugin_sha256": sha256(capture_assets / "libserver_stock.so"),

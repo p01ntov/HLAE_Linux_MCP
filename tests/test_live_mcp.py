@@ -392,13 +392,36 @@ class McpTests(unittest.TestCase):
         names = {tool["name"] for tool in TOOLS}
         removed = ("set_player_weapon_paint", "reset_player_weapon_paint", "set_player_gloves",
                    "reset_player_gloves", "apply_appearance_pack", "reset_appearance", "probe_appearance_pack")
-        self.assertEqual(len(TOOLS),36)
+        self.assertEqual(len(TOOLS), len(names), "MCP tool names must be unique")
         for method in removed:
             with self.subTest(method=method):
                 self.assertNotIn(method,LIVE_METHODS)
                 self.assertNotIn("cs2_camera_"+method,names)
                 self.assertEqual(self.call(method,{})["error"]["code"],-32602)
         self.assertEqual(self.client.calls,[])
+
+    def test_lens_settings_are_typed_before_native_forwarding(self):
+        settings = {"enabled": True, "distortion": -.25, "vignette": .2, "chromatic": 1.5}
+        self.assertFalse(self.call("set_lens", {"settings": settings})["result"]["isError"])
+        self.assertEqual(self.client.calls[-1], ("set_lens", {"settings": settings}))
+        before = list(self.client.calls)
+        for settings in ({"enabled": 1}, {"distortion": 1}, {"chromatic": -1}, {"depth": True}):
+            with self.subTest(settings=settings):
+                self.assertEqual(self.call("set_lens", {"settings": settings})["error"]["code"], -32602)
+        self.assertEqual(self.client.calls, before)
+
+    def test_follow_tool_only_returns_an_offline_draft(self):
+        arguments = {"demo": "/recordings/match.dem", "player": "76561198000000001",
+                     "start_tick": 1000, "end_tick": 1064, "options": {"mode": "attach"}}
+        draft = {"project": {"name": "Follow draft"}, "evidence": {"status": "draft_unverified"}}
+        with patch("cs2_mvp.follow_camera.bake_demo_follow", return_value=draft) as bake:
+            result = call_tool(self.client, "cs2_demo_follow_draft", arguments)
+        bake.assert_called_once_with(arguments["demo"], player=arguments["player"], start_tick=1000,
+                                     end_tick=1064, options={"mode": "attach"})
+        self.assertEqual(result, draft)
+        self.assertEqual(self.client.calls, [])
+        definition = next(tool for tool in TOOLS if tool["name"] == "cs2_demo_follow_draft")
+        self.assertTrue(definition["annotations"]["readOnlyHint"])
 
     def test_legacy_project_skin_fields_fail_without_silent_removal(self):
         legacy = ({"appearance":{}}, {"appearance":{"path":"/private/pack","models":["agents/models/a.vmdl"]}},

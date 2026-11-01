@@ -31,7 +31,7 @@ MAX_MESSAGE = 1024 * 1024
 MAX_RESPONSE = 4 * 1024 * 1024
 LIVE_METHODS = frozenset({"get_state", "set_camera", "release_camera", "add_key", "update_key",
                           "remove_key", "set_project", "scrub", "preview", "demo_control",
-                          "apply_preset", "undo", "redo", "export_project", "import_project", "set_scene", "reset_scene",
+                          "apply_preset", "undo", "redo", "export_project", "import_project", "set_scene", "reset_scene", "set_lens", "reset_lens",
                           "request_export", "inspect_entities",
                           "set_player_cosmetics", "reset_player_cosmetics", "set_team_palette", "reset_team_palette",
                           "set_presentation", "select_player", "select_timeline_player", "set_editor_preferences", "set_demo_playback_range"})
@@ -598,7 +598,8 @@ def run_session(demo: Path, *, game_dir: str | None = None, plugin: Path | None 
                 raise LiveError(f"Refusing to replace a non-socket file: {socket_path}")
             socket_path.unlink()
         launch = launch_arguments(runtime, game, demo_link, run, windowed=windowed, screen_size=screen_size)
-        environment = os.environ.copy()
+        from .discovery import steam_runtime_environment
+        environment = steam_runtime_environment(os.environ)
         environment.pop("CS2_CAMERA_SHOT_LIBRARY", None)
         environment.pop("CS2_CAMERA_SHOT_LIBRARY_ERROR", None)
         if library is not None:
@@ -919,6 +920,10 @@ def graphical_launcher(args) -> int:
     buttons.addWidget(export_button)
     buttons.addWidget(stop_button)
     layout.addLayout(buttons)
+    follow_button=QtWidgets.QPushButton("FOLLOW FROM DEMO…")
+    follow_button.setObjectName("follow_from_demo")
+    follow_button.setToolTip("Generate an editable draft from recorded player motion; does not move the live camera")
+    layout.addWidget(follow_button)
     window.setStyleSheet("""
         QMainWindow,QWidget { background: #292929; color: #cccccc; font-size: 13px; }
         QLabel#title { font-size: 19px; font-weight: 600; color: #eeeeee; margin-bottom: 10px; }
@@ -939,6 +944,7 @@ def graphical_launcher(args) -> int:
     seen_export = 0
     exporting = False
     export_dialog = None
+    follow_dialog = None
     export_job = None
     monitor_stop = threading.Event()
     library_loading = False
@@ -964,6 +970,23 @@ def graphical_launcher(args) -> int:
             self.outcome = perform_export(self.options, demo=self.demo, game_dir=self.game, client=NativeClient(),
                                     stop_session=stop_event.set, wait_session=wait,
                                     cancel_event=self.dialog.cancel_event, notify=self.progress.emit)
+
+    def open_follow():
+        nonlocal follow_dialog
+        if follow_dialog is not None and follow_dialog.isVisible():
+            follow_dialog.raise_();follow_dialog.activateWindow();return
+        if not demo_edit.text().strip():
+            browse()
+            if not demo_edit.text().strip():return
+        from .follow_ui import create_follow_dialog
+        from .project_storage import projects_directory
+        try:
+            follow_dialog=create_follow_dialog(window,Path(demo_edit.text()),projects_directory(args.projects_dir),
+                initial_tick=int((latest_state or {}).get("tick",0)))
+            follow_dialog.draftSaved.connect(lambda path:log_box.appendPlainText("Follow draft saved: "+path+". Check the route in Camera Map before using it."))
+            follow_dialog.show()
+        except (OSError,ValueError,LiveError) as error:
+            QtWidgets.QMessageBox.warning(window,"Follow draft",str(error))
 
     def select_library_demo(index):
         item = demo_library.itemData(index)
@@ -1234,6 +1257,7 @@ def graphical_launcher(args) -> int:
     start_button.clicked.connect(launch)
     stop_button.clicked.connect(stop_session)
     export_button.clicked.connect(open_export)
+    follow_button.clicked.connect(open_follow)
     def signal_stop(signum, frame):
         nonlocal closing
         closing = True

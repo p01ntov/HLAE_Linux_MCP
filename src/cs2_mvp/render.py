@@ -20,7 +20,9 @@ import time
 import uuid
 
 from .demo import parser, resolve_player
-from .discovery import ROOT, doctor, ensure_plugin, process_ids, sha256, steam_roots, external_environment, validate_media_tools
+from .discovery import (ROOT, doctor, ensure_plugin, process_ids, sha256, steam_roots, external_environment,
+                        steam_runtime_environment, validate_media_tools)
+from .lens_effects import LENS_ALGORITHM, apply_lens, lens_active, read_tga, validate_lens, write_tga
 
 
 class RenderCancelled(RuntimeError):
@@ -453,12 +455,14 @@ def validate_export_destination(destination: Path, export_format: str) -> None:
         raise ValueError("Choose a new .mp4 output file; existing files are never overwritten")
 
 
-def estimate_capture_storage(samples, width, height, export_format="mp4"):
+def estimate_capture_storage(samples, width, height, export_format="mp4", *, lens=False):
     raw = math.ceil(samples * width * height * 4 * 1.2 + 512 * 1024**2)
     # The engine first writes uncompressed TGA. PNGs coexist with those inputs
     # until validation/publication succeeds; compressed size is scene-dependent.
     png = math.ceil(samples * (width * height * 3 + height + 1024) * 1.02) if export_format == "png" else 0
-    return {"raw": raw, "output_upper_estimate": png, "working": raw + png}
+    intermediate = math.ceil(samples * (width * height * 3 + 18)) if lens else 0
+    return {"raw": raw, "output_upper_estimate": png, "lens_intermediate": intermediate,
+            "working": raw + png + intermediate}
 
 
 def _filesystem_space(path):
@@ -468,13 +472,18 @@ def _filesystem_space(path):
     return path.stat().st_dev, shutil.disk_usage(path).free
 
 
-def _validate_png_storage(game, work_root, destination, samples, width, height, duration, audio):
-    storage = estimate_capture_storage(samples, width, height, "png")
+def _validate_capture_storage(game, work_root, destination, samples, width, height, duration, audio, *,
+                              export_format="mp4", lens=False):
+    storage = estimate_capture_storage(samples, width, height, export_format, lens=lens)
     reserve = 512 * 1024**2
-    # Source TGAs, per-job metadata/hashes and final PNGs can be on separate
-    # disks. Add their requirements only when they share the same filesystem.
-    allocations = ((game, storage["raw"] - reserve), (work_root, 0),
-                   (destination.parent, storage["output_upper_estimate"] + (math.ceil(duration * 384000) if audio else 0)))
+    # Source TGAs, lens intermediates and published results can live on separate
+    # disks. Charge every allocation to its actual filesystem and reserve once
+    # per device. MP4 compressed size is content-dependent; its exact publication
+    # allocation is checked after encoding, and encoding monitors workspace free
+    # space instead of rejecting jobs using an invented compression ratio.
+    allocations = ((game, storage["raw"] - reserve), (work_root, storage["lens_intermediate"]),
+                   (destination.parent, storage["output_upper_estimate"] +
+                    (math.ceil(duration * 384000) if audio and export_format == "png" else 0)))
     budgets = {}
     for path, size in allocations:
         device, free = _filesystem_space(path)
@@ -489,6 +498,11 @@ def _validate_png_storage(game, work_root, destination, samples, width, height, 
     return list(budgets.values())
 
 
+def _validate_png_storage(game, work_root, destination, samples, width, height, duration, audio, *, lens=False):
+    return _validate_capture_storage(game, work_root, destination, samples, width, height, duration, audio,
+                                     export_format="png", lens=lens)
+
+
 def _encode_frames(command, run, output_frames, *, timeout, cancel_event, notify, description):
     progress_file = run / "ffmpeg-progress.txt"
     progress_file.unlink(missing_ok=True)
@@ -496,6 +510,8 @@ def _encode_frames(command, run, output_frames, *, timeout, cancel_event, notify
     previous_progress = -1
     def encoding_progress():
         nonlocal previous_progress
+        if shutil.disk_usage(run).free < 512 * 1024**2:
+            raise RuntimeError("Not enough free disk space while encoding; raw capture retained")
         try:
             with progress_file.open("rb") as source:
                 source.seek(0, os.SEEK_END)
@@ -563,6 +579,78 @@ def _publish_directory(staging: Path, destination: Path):
         os.close(descriptor)
 
 
+class _LensProcessingBudget:
+    """Bound healthy work by input size and stalls by checkpoint inactivity.
+
+    CPU processing is deliberately independent of the game's capture timeout:
+    even a normal 30-second 1440p/120-FPS job takes over 600 seconds. The work
+    allowance uses a conservative two million pixels/second plus per-frame I/O
+    overhead. Cancellation and inactivity are checked between bounded image
+    tiles, input packets/rows and output rows, including within a single frame.
+    """
+
+    def __init__(self, frames, width, height, timeout, cancel_event):
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise TimeoutError("Lens processing requires a positive finite inactivity timeout; raw capture retained")
+        self.total_seconds = max(timeout, frames * (.1 + width * height / 2_000_000))
+        self.inactivity_seconds = timeout
+        self.cancel_event = cancel_event
+        self.started = self.last_checkpoint = time.monotonic()
+
+    def check(self):
+        _check_cancel(self.cancel_event)
+        now = time.monotonic()
+        if now - self.last_checkpoint >= self.inactivity_seconds:
+            raise TimeoutError("Lens processing made no progress within the inactivity timeout; raw capture retained")
+        if now - self.started >= self.total_seconds:
+            raise TimeoutError("Lens processing exceeded the input-size processing budget; raw capture retained")
+        self.last_checkpoint = now
+
+
+@contextmanager
+def _lens_input_sequence(plan, run, frames, pattern, start_number, *, timeout, cancel_event, notify):
+    """Build one private intermediate sequence; retries always use frozen settings.
+
+    Raw engine frames remain untouched until ordinary successful export cleanup.
+    No incomplete intermediate can be consumed by FFmpeg. On cancellation or
+    encoder failure the owned intermediates are removed, leaving a clean retry.
+    """
+    settings = validate_lens(plan.get("lens", {}))
+    plan["lens"] = settings
+    if not lens_active(settings):
+        plan["lens_processing"] = {"active": False, "source_pixels_unchanged": True}
+        yield pattern, start_number
+        return
+    required = estimate_capture_storage(len(frames), plan["width"], plan["height"], lens=True)["lens_intermediate"]
+    if required + 512 * 1024**2 > shutil.disk_usage(run).free:
+        raise RuntimeError("Not enough free disk space for lens intermediate frames; raw capture retained")
+    budget = _LensProcessingBudget(len(frames), plan["width"], plan["height"], timeout, cancel_event)
+    check_processing = budget.check
+    with tempfile.TemporaryDirectory(prefix="lens-frames-", dir=run) as temporary:
+        directory = Path(temporary)
+        plan["lens_processing"] = {"active": True, "algorithm": LENS_ALGORITHM, "settings": settings,
+                                   "color_space": "srgb", "interpolation": "bilinear_linear_light",
+                                   "source": "raw_engine_tga", "output": "processed_rgb24",
+                                   "frames": len(frames), "complete": False, "temporal_resampling": False,
+                                   "intermediate_retained": False, "intermediate_bytes": required,
+                                   "processing_budget": {"total_seconds": budget.total_seconds,
+                                                         "inactivity_seconds": budget.inactivity_seconds}}
+        save_json(run / "manifest.json", plan)
+        for index, path in enumerate(frames):
+            check_processing()
+            notify({"stage": "lens", "message": f"Applying lens {index:,} / {len(frames):,} frames",
+                    "progress": index / len(frames)})
+            rgb = read_tga(path, (plan["width"], plan["height"]), check_cancel=check_processing)
+            processed = apply_lens(rgb, settings, check_cancel=check_processing)
+            write_tga(directory / f"frame_{index:08d}.tga", processed, check_cancel=check_processing)
+            del rgb, processed
+        check_processing()
+        plan["lens_processing"]["complete"] = True
+        save_json(run / "manifest.json", plan)
+        notify({"stage": "lens", "message": f"Lens applied to {len(frames):,} frames", "progress": 1.0})
+        yield str(directory / "frame_%08d.tga"), 0
+
+
 def _export_png_sequence(plan, run, destination, pattern, start_number, frames, waves, *,
                          timeout, cancel_event, notify):
     capture_fps, fps = int(plan.get("capture_fps", plan["fps"])), int(plan["fps"])
@@ -583,8 +671,11 @@ def _export_png_sequence(plan, run, destination, pattern, start_number, frames, 
         expected = [f"frame_{index:08d}.png" for index in range(count)]
         if sorted(path.name for path in staging.iterdir()) != expected:
             raise RuntimeError("Exported PNG sequence contains missing or unexpected frames")
-        notify({"stage": "validation", "message": "Comparing every PNG with its captured RGB frame"})
-        original_hashes, png_hashes = run / "raw-rgb.sha256", run / "png-rgb.sha256"
+        processed = bool(plan.get("lens_processing", {}).get("active"))
+        reference = "lens_processed_rgb24" if processed else "raw_engine_rgb24"
+        notify({"stage": "validation", "message": "Comparing every PNG with its lens-processed RGB frame" if processed
+                else "Comparing every PNG with its captured RGB frame"})
+        original_hashes, png_hashes = run / ("lens-rgb.sha256" if processed else "raw-rgb.sha256"), run / "png-rgb.sha256"
         _rgb_frame_hashes(pattern, start_number, capture_fps, original_hashes, timeout=timeout, cancel_event=cancel_event)
         _rgb_frame_hashes(output_pattern, 0, capture_fps, png_hashes, timeout=timeout, cancel_event=cancel_event)
         if any(_frame_hash_dimensions(path) != (plan["width"], plan["height"]) for path in (original_hashes, png_hashes)):
@@ -598,7 +689,7 @@ def _export_png_sequence(plan, run, destination, pattern, start_number, frames, 
         if compared != count:
             raise RuntimeError("PNG decoded frame count differs from the capture")
         validation = {"verified": True, "method": "decoded_rgb24_sha256", "frames": compared,
-                      "temporal_resampling": False, "chroma_subsampling": False}
+                      "reference": reference, "temporal_resampling": False, "chroma_subsampling": False}
         audio = bool(plan.get("audio", True))
         if audio:
             with waves[0].open("rb") as source, (staging / "audio.wav").open("xb") as output:
@@ -621,6 +712,7 @@ def _export_png_sequence(plan, run, destination, pattern, start_number, frames, 
                     "interpreted_duration": count / fps, "interpreted_speed": fps / capture_fps,
                     "start_tick": plan["start_tick"], "end_tick": plan["end_tick"], "tickrate": plan.get("tickrate", 64),
                     "audio": {"file": "audio.wav", "timing": "original_demo_time"} if audio else None,
+                    "lens": plan.get("lens", validate_lens({})), "lens_processing": plan.get("lens_processing", {"active": False}),
                     "lossless_validation": validation, "checksums_file": "checksums.sha256",
                     "checksums_sha256": sha256(staging / "checksums.sha256")}
         save_json(staging / "sequence.json", metadata)
@@ -632,7 +724,8 @@ def _export_png_sequence(plan, run, destination, pattern, start_number, frames, 
             f"At {fps} fps the sequence lasts {count/fps:.6f} seconds ({fps/capture_fps:.6f}x game speed).\n"
             "After Effects does not automatically read sequence.json; set the interpretation rate yourself.\n"
             "No resize, frame blending, optical flow, YUV conversion or chroma subsampling was applied.\n"
-            "The images preserve the captured 8-bit RGB values; no HDR or alpha channel is claimed.\n"
+            + ("Lens finishing was applied in linear light; PNGs preserve the resulting 8-bit sRGB values exactly.\n"
+               if processed else "The images preserve the captured 8-bit RGB values; no HDR or alpha channel is claimed.\n")
             + ("audio.wav retains original game timing and must be retimed separately for slow motion.\n" if audio else "")
         )
         for name in ("sequence.json", "checksums.sha256", "AE_IMPORT.txt"):
@@ -819,6 +912,9 @@ def _finish_capture(run: Path, *, keep_raw: bool = False, timeout: float = 600, 
     _check_cancel(cancel_event)
     notify = notify or (lambda message: None)
     plan = json.loads((run / "manifest.json").read_text())
+    # Capture-time settings are immutable export inputs, including on resume.
+    # Legacy manifests did not contain lens and remain byte-preserving by default.
+    plan["lens"] = validate_lens(plan.get("lens", {}))
     game = Path(plan["environment"]["game_directory"])
     movie, fps = plan["movie_prefix"], int(plan["fps"])
     capture_fps = int(plan.get("capture_fps", fps))
@@ -875,66 +971,70 @@ def _finish_capture(run: Path, *, keep_raw: bool = False, timeout: float = 600, 
     plan.setdefault("retiming", {}).update({"mode": "image_sequence" if export_format == "png" else "slow_motion" if slow else "normal_duration", "raw_samples_fps": capture_fps,
                                             "retained_for_conform": keep_raw or export_format == "png", "encoded_playback_speed": fps / capture_fps if slow or export_format == "png" else 1.0,
                                             "raw_conform_speed_if_reinterpreted": fps / capture_fps})
-    if export_format == "png":
-        _export_png_sequence(plan, run, destination, pattern, numbers[0], frames, waves,
-                             timeout=timeout, cancel_event=cancel_event, notify=notify)
+    with _lens_input_sequence(plan, run, frames, pattern, numbers[0], timeout=timeout,
+                              cancel_event=cancel_event, notify=notify) as (pattern, input_start):
+        if export_format == "png":
+            _export_png_sequence(plan, run, destination, pattern, input_start, frames, waves,
+                                 timeout=timeout, cancel_event=cancel_event, notify=notify)
+            plan.pop("error", None)
+            plan.update({"status": "done", "export_format": "png"})
+            if not keep_raw:
+                for path in raw:
+                    path.unlink()
+            save_json(run / "manifest.json", plan)
+            return plan
+        encoded = run / "encoded.mp4"
+        encoded.unlink(missing_ok=True)
+        output_frames = len(frames) if slow else round(len(frames) * fps / capture_fps)
+        command = ["ffmpeg", "-v", "warning", "-nostdin", "-framerate", str(fps if slow else capture_fps), "-start_number", str(input_start), "-i", pattern]
+        if audio:
+            command += ["-i", str(waves[0]), "-map", "0:v:0", "-map", "1:a:0", "-c:a", "aac", "-b:a", "192k", "-af", "apad"]
+        else:
+            command += ["-map", "0:v:0", "-an"]
+        command += ["-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p"]
+        if encoding["rate_control"] == "bitrate":
+            command += ["-b:v", str(encoding["target_bitrate_bps"])]
+        else:
+            command += ["-crf", str(encoding["crf"])]
+        if not slow:
+            command += ["-vf", f"fps=fps={fps}:start_time=0:round=near"]
+        command += ["-frames:v", str(output_frames), "-t", str(output_frames / fps), "-movflags", "+faststart", str(encoded)]
+        _encode_frames(command, run, output_frames, timeout=timeout, cancel_event=cancel_event,
+                       notify=notify, description="Encoding")
+        notify({"stage": "validation", "message": "Checking the exported video"})
+        plan["expected_output_duration"] = output_frames / fps
+        plan["media"] = validate_media(encoded, output_frames / fps, fps, audio, cancel_event)
+        if (plan["media"]["width"], plan["media"]["height"]) != (plan["width"], plan["height"]):
+            raise RuntimeError("CS2 did not use the requested video resolution")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        _check_cancel(cancel_event)
+        if encoded.stat().st_size + 512 * 1024**2 > shutil.disk_usage(destination.parent).free:
+            raise RuntimeError("Not enough free disk space to publish the encoded video; raw capture retained")
+        fd, name = tempfile.mkstemp(prefix=".cs2-mvp-", suffix=".mp4", dir=destination.parent)
+        temporary = Path(name)
+        try:
+            with os.fdopen(fd, "wb") as output_file, encoded.open("rb") as source:
+                while True:
+                    _check_cancel(cancel_event)
+                    chunk = source.read(1024**2)
+                    if not chunk:
+                        break
+                    output_file.write(chunk)
+                output_file.flush()
+                os.fsync(output_file.fileno())
+            # Atomic, exclusive publication on the output filesystem: a partially
+            # copied file never appears under the final name.
+            _check_cancel(cancel_event)
+            os.link(temporary, destination)
+        finally:
+            temporary.unlink(missing_ok=True)
         plan.pop("error", None)
-        plan.update({"status": "done", "export_format": "png"})
+        plan.update({"status": "done", "output_sha256": sha256(destination)})
         if not keep_raw:
             for path in raw:
                 path.unlink()
         save_json(run / "manifest.json", plan)
         return plan
-    encoded = run / "encoded.mp4"
-    encoded.unlink(missing_ok=True)
-    output_frames = len(frames) if slow else round(len(frames) * fps / capture_fps)
-    command = ["ffmpeg", "-v", "warning", "-nostdin", "-framerate", str(fps if slow else capture_fps), "-start_number", str(numbers[0]), "-i", pattern]
-    if audio:
-        command += ["-i", str(waves[0]), "-map", "0:v:0", "-map", "1:a:0", "-c:a", "aac", "-b:a", "192k", "-af", "apad"]
-    else:
-        command += ["-map", "0:v:0", "-an"]
-    command += ["-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p"]
-    if encoding["rate_control"] == "bitrate":
-        command += ["-b:v", str(encoding["target_bitrate_bps"])]
-    else:
-        command += ["-crf", str(encoding["crf"])]
-    if not slow:
-        command += ["-vf", f"fps=fps={fps}:start_time=0:round=near"]
-    command += ["-frames:v", str(output_frames), "-t", str(output_frames / fps), "-movflags", "+faststart", str(encoded)]
-    _encode_frames(command, run, output_frames, timeout=timeout, cancel_event=cancel_event,
-                   notify=notify, description="Encoding")
-    notify({"stage": "validation", "message": "Checking the exported video"})
-    plan["expected_output_duration"] = output_frames / fps
-    plan["media"] = validate_media(encoded, output_frames / fps, fps, audio, cancel_event)
-    if (plan["media"]["width"], plan["media"]["height"]) != (plan["width"], plan["height"]):
-        raise RuntimeError("CS2 did not use the requested video resolution")
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    _check_cancel(cancel_event)
-    fd, name = tempfile.mkstemp(prefix=".cs2-mvp-", suffix=".mp4", dir=destination.parent)
-    temporary = Path(name)
-    try:
-        with os.fdopen(fd, "wb") as output_file, encoded.open("rb") as source:
-            while True:
-                _check_cancel(cancel_event)
-                chunk = source.read(1024**2)
-                if not chunk:
-                    break
-                output_file.write(chunk)
-            output_file.flush()
-            os.fsync(output_file.fileno())
-        # Atomic, exclusive publication on the output filesystem: a partially
-        # copied file never appears under the final name.
-        _check_cancel(cancel_event)
-        os.link(temporary, destination)
-    finally:
-        temporary.unlink(missing_ok=True)
-    plan.pop("error", None)
-    plan.update({"status": "done", "output_sha256": sha256(destination)})
-    if not keep_raw:
-        for path in raw:
-            path.unlink()
-    save_json(run / "manifest.json", plan)
-    return plan
 
 
 def render_clip(demo: Path, player: str | None, start: int | None = None, end: int | None = None, *, game_dir: str | None = None,
@@ -963,6 +1063,7 @@ def render_clip(demo: Path, player: str | None, start: int | None = None, end: i
     camera_spec = json.loads(camera.expanduser().read_text()) if camera is not None else None
     if camera is not None and not isinstance(camera_spec, dict):
         raise ValueError("Camera JSON must contain an object")
+    lens = validate_lens((camera_spec or {}).get("lens", {}))
     live_project = isinstance(camera_spec, dict) and "type" not in camera_spec and "keys" in camera_spec
     from .capture_environment import validate_environment
     capture_environment = validate_environment(camera_spec or {})
@@ -1029,13 +1130,10 @@ def render_clip(demo: Path, player: str | None, start: int | None = None, end: i
     suffix = ".mp4" if export_format == "mp4" else "-frames"
     destination = (output or ROOT / "outputs" / f"clip-{start}-{end}-{uuid.uuid4().hex[:8]}{suffix}").expanduser().absolute()
     validate_export_destination(destination, export_format)
-    storage = estimate_capture_storage(expected_samples, width, height, export_format)
+    storage = estimate_capture_storage(expected_samples, width, height, export_format, lens=lens_active(lens))
     estimate = storage["working"]
-    storage_requirements = None
-    if export_format == "png":
-        storage_requirements = _validate_png_storage(game, ROOT, destination, expected_samples, width, height, duration, audio)
-    elif estimate > min(environment["game_free_bytes"], shutil.disk_usage(ROOT).free):
-        raise RuntimeError(f"Not enough free disk space for ~{estimate / 1024**3:.1f} GiB of raw capture")
+    storage_requirements = _validate_capture_storage(game, ROOT, destination, expected_samples, width, height, duration, audio,
+                                                     export_format=export_format, lens=lens_active(lens))
     plan = {"demo": str(demo), "demo_header": header, "target": target, "start_tick": start,
             "end_tick": end, "tickrate": 64, "expected_duration": duration, "fps": fps,
             "capture_fps": capture_fps, "export_format": export_format, "video_encoding": encoding,
@@ -1045,11 +1143,11 @@ def render_clip(demo: Path, player: str | None, start: int | None = None, end: i
                          "retained_for_conform": keep_raw or export_format == "png", "encoded_playback_speed": fps / capture_fps if preserve_samples else 1.0,
                          "raw_conform_speed_if_reinterpreted": fps / capture_fps},
             "audio": audio, "expected_output_duration": expected_samples / fps if preserve_samples else round(expected_samples * fps / capture_fps) / fps,
+            "lens": lens, "estimated_lens_intermediate_bytes": storage["lens_intermediate"],
             "width": width, "height": height, "estimated_raw_bytes": storage["raw"], "estimated_working_bytes": estimate,
             "estimated_output_upper_bytes": storage["output_upper_estimate"],
             "output": str(destination), "environment": environment}
-    if storage_requirements is not None:
-        plan["storage_requirements"] = storage_requirements
+    plan["storage_requirements"] = storage_requirements
     if capture_environment:
         plan["capture_environment"] = capture_environment
         plan["environment_abi"] = 1
@@ -1104,7 +1202,7 @@ def render_clip(demo: Path, player: str | None, start: int | None = None, end: i
                       "-con_logfile", str(run / "console.log"),
                       "+demo_ui_mode", "0",
                       "+playdemo", str(demo_link)]
-            env = external_environment()
+            env = steam_runtime_environment(external_environment())
             if catalog_path is not None:
                 env.update({"CS2_CAMERA_CAPTURE_COSMETICS": "1", "CS2_CAMERA_COSMETICS_CATALOG": str(catalog_path)})
             profile = run / "config"

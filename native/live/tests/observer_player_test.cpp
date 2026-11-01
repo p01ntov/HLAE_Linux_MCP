@@ -116,4 +116,21 @@ static void CurrentBuildObserverReadback(){
     memory.Put(memory.services,ObserverMemory::Base+0x44c6f58); // Reject a stale legacy vtable even with otherwise valid ownership.
     assert(!Probe::Target(memory.Reader(),ObserverMemory::Base,memory.system,memory.actors,memory.fields,profile));
 }
-int main(){ExactTargetAndCommandIndex();RejectWrongServicesAndSerials();UniqueSteamAndGenericPawnMapping();CurrentBuildObserverReadback();std::cout<<"Observer player: exact service/owner/target, full serials, unique current SteamID and controller-index mapping passed\n";}
+static void LatestBuildObserverReadback(){
+    constexpr std::array<unsigned char,20> id={0xc6,0xc5,0x09,0x8e,0xab,0x52,0x96,0x4d,0x9d,0x08,0x82,0x79,0xca,0x5c,0xc9,0x91,0xc7,0x6d,0x1a,0x7d};
+    const auto* profile=cs2_live::ClientBuildProfile::Find(id.data(),id.size());assert(profile);
+    ObserverMemory memory(2,profile);
+    const auto readback=[&]{return Probe::Target(memory.Reader(),ObserverMemory::Base,memory.system,memory.actors,memory.fields,profile);};
+    assert(!memory.Target());
+    const auto target=readback();
+    assert(target && target->steamId==ObserverMemory::Steam && target->pawn.handle==memory.pawn.handle);
+    // Both former vtables must fail even though the actor ownership is valid.
+    for(const Address old:{0x44c6f58,0x44c8b98}) {
+        memory.Put(memory.services,ObserverMemory::Base+old);assert(!readback());
+    }
+    memory.Put(memory.services,ObserverMemory::Base+profile->Offset(0x44c6f58));
+    assert(readback());
+    memory.Put(memory.services+memory.fields.observerTarget,memory.pawn.handle+(1u<<15));
+    assert(!readback());
+}
+int main(){ExactTargetAndCommandIndex();RejectWrongServicesAndSerials();UniqueSteamAndGenericPawnMapping();CurrentBuildObserverReadback();LatestBuildObserverReadback();std::cout<<"Observer player: exact service/owner/target, full serials, unique current SteamID and controller-index mapping passed\n";}

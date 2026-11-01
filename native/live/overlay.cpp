@@ -28,6 +28,8 @@
 #include "cosmetics_catalog.h"
 #include "shot_library.h"
 #include "overlay_blur.h"
+#include "lens_effects.h"
+#include "depth_probe.h"
 #include "overlay_capture.h"
 #include "overlay_platform.h"
 
@@ -67,8 +69,10 @@ struct Swapchain {
     Device* device{}; VkSwapchainKHR handle{}; VkFormat format{}; VkExtent2D extent{};
     uint32_t min_images=2; VkRenderPass pass{}; VkCommandPool pool{};
     uint32_t family=~0u; VkQueue queue{}; std::vector<Frame> frames;
-    bool ready=false, failed=false, blur_supported=false,frame_blur_enabled=false;
+    bool ready=false, failed=false, blur_supported=false,frame_blur_enabled=false,lens_supported=false;
     cs2_camera_blur::Backdrop blur;
+    cs2_camera_lens::Effects lens;
+    cs2_camera_lens::Settings frame_lens;
     cs2_overlay_capture::Probe capture;
     std::uint64_t capture_mode_revision=0;
     VkPresentModeKHR present_mode=VK_PRESENT_MODE_FIFO_KHR;
@@ -77,6 +81,7 @@ struct Device {
     VkDevice handle{}; VkPhysicalDevice physical{}; Instance* instance{};
     PFN_vkGetDeviceProcAddr gdpa{};
     PFN_vkSetDeviceLoaderData set_loader_data{};
+    std::unique_ptr<cs2_camera_depth::Probe> depth_probe;
     std::unordered_map<VkQueue,uint32_t> queues;
     std::unordered_map<VkSwapchainKHR,std::unique_ptr<Swapchain>> swaps;
 #define DEVICE_FN(name) PFN_vk##name name{};
@@ -115,6 +120,34 @@ cs2_live_ui::EditorUi editor;
 using StateFn=const char*(*)();
 using CommandFn=void(*)(const char*);
 StateFn state_fn=nullptr,map_preview_fn=nullptr; CommandFn command_fn=nullptr;
+CommandFn lens_status_fn=nullptr;
+std::string last_lens_status;
+std::string LensStatus(const Swapchain& swap) {
+    const bool available=swap.ready && !swap.failed && swap.lens.Ready();
+    return nlohmann::json{{"available",available},{"backend","vulkan-color"},{"depth_available",false},
+        {"reason",available?"":swap.failed?"The Vulkan overlay is unavailable":
+            !swap.ready?"The Vulkan swapchain is not ready":swap.lens_supported?swap.lens.Error():
+            "The current swapchain does not support SDR color lens effects"}}.dump();
+}
+void PublishLensStatus(const std::string& status) {
+    if(lens_status_fn && status!=last_lens_status) {
+        lens_status_fn(status.c_str());last_lens_status=status;
+    }
+}
+cs2_camera_lens::Settings ReadLensSettings(const nlohmann::json& state) {
+    const auto lens=state.find("lens");
+    if(lens==state.end() || !lens->is_object())return {};
+    try {
+        if(!state.value("connected",false) || !state.value("demo",false))return {};
+        cs2_camera_lens::Settings settings;
+        settings.enabled=lens->value("enabled",false);
+        settings.distortion=lens->value("distortion",0.f);
+        settings.vignette=lens->value("vignette",0.f);
+        settings.chromatic=lens->value("chromatic",0.f);
+        if(settings.Valid())return settings;
+    }catch(const nlohmann::json::exception&) {}
+    return {};
+}
 std::atomic<bool> bridge_ready{false};
 template<class T> T Sdl(const char* name);
 void CursorMode(bool capture);
@@ -454,6 +487,7 @@ int FindBridge(dl_phdr_info* info,size_t,void*) {
         if(!state_fn)state_fn=reinterpret_cast<StateFn>(dlsym(library,"cs2_live_state_json"));
         map_preview_fn=reinterpret_cast<StateFn>(dlsym(library,"cs2_live_map_preview_json"));
         command_fn=reinterpret_cast<CommandFn>(dlsym(library,"cs2_live_command_json"));
+        lens_status_fn=reinterpret_cast<CommandFn>(dlsym(library,"cs2_live_lens_status_json"));
         dlclose(library);
     }
     if(state_fn && command_fn){bridge_ready=true;return 1;}
@@ -462,6 +496,7 @@ int FindBridge(dl_phdr_info* info,size_t,void*) {
 bool Draw(Swapchain& s,uint32_t image_index) {
     const bool frame_shown=shown.load();
     if(!bridge_ready.load())dl_iterate_phdr(FindBridge,nullptr);
+    const auto lens_status=LensStatus(s);PublishLensStatus(lens_status);
     auto& io=ImGui::GetIO();
     io.DisplaySize=ImVec2(float(s.extent.width),float(s.extent.height));
     io.DisplayFramebufferScale=ImVec2(1,1);
@@ -482,6 +517,10 @@ bool Draw(Swapchain& s,uint32_t image_index) {
       {"project",{{"name","Untitled"},{"start_tick",0},{"duration",5},{"keys",nlohmann::json::array()}}},
       {"cursor",0},{"preview_playing",false},{"revision",0},{"error","Waiting for live camera module"}};
     if(state_fn) {try{state=nlohmann::json::parse(state_fn());}catch(...){state["error"]="Invalid camera state";}}
+    // Invalid/missing state disables the pass immediately; a prior scene's
+    // settings must not remain active after disconnect or project reset.
+    s.frame_lens=ReadLensSettings(state);
+    state["lens_runtime"]=nlohmann::json::parse(lens_status);
     if(map_preview_fn) {
         static std::string previous_map;
         const char* raw=map_preview_fn();
@@ -574,6 +613,7 @@ void CheckBackendResult(VkResult result) {
 }
 void DisableOverlay(Swapchain& s) {
     s.failed=true;overlay_available=false;wants_mouse=false;wants_keyboard=false;text_input=false;
+    PublishLensStatus(LensStatus(s));
     KeyboardMode(false); // MainThreadService releases the SDL cursor/grab.
 }
 VkResult CompleteOverlaySubmission(Device& d,const Frame& frame,bool panels_drawn,bool capture,bool diagnostic_wait) {
@@ -586,9 +626,11 @@ VkResult CompleteOverlaySubmission(Device& d,const Frame& frame,bool panels_draw
 }
 void Cleanup(Swapchain& s) {
     auto& d=*s.device;
-    if(active==&s){overlay_available=false;KeyboardMode(false);}
+    const bool was_active=active==&s;
+    if(was_active){overlay_available=false;KeyboardMode(false);}
     if(s.ready || s.pool)d.DeviceWaitIdle(d.handle);
     s.capture.Destroy();
+    s.lens.Destroy();
     s.blur.Destroy();
     if(active==&s) {if(ImGui::GetCurrentContext()){
         if(ImGui::GetIO().BackendRendererUserData)ImGui_ImplVulkan_Shutdown();
@@ -602,6 +644,7 @@ void Cleanup(Swapchain& s) {
     if(s.pool)d.DestroyCommandPool(d.handle,s.pool,nullptr);
     if(s.pass)d.DestroyRenderPass(d.handle,s.pass,nullptr);
     s.frames.clear();s.pool={};s.pass={};s.ready=false;
+    if(was_active || !active)PublishLensStatus(LensStatus(s));
 }
 bool Setup(Swapchain& s,VkQueue queue,uint32_t family) {
     auto& d=*s.device;
@@ -673,12 +716,22 @@ bool Setup(Swapchain& s,VkQueue queue,uint32_t family) {
         if(!s.blur.Initialize(blur))Log("backdrop unavailable: %s",s.blur.Error().c_str());
         else Log("Gaussian scene backdrop ready");
     }
+    if(s.lens_supported) {
+        cs2_camera_lens::InitInfo lens;
+        lens.physical=d.physical;lens.device=d.handle;lens.gdpa=d.gdpa;
+        lens.getMemoryProperties=d.instance->memory_properties;lens.getFormatProperties=d.instance->format_properties;
+        lens.extent=s.extent;lens.sourceFormat=s.format;
+        for(const auto& frame:s.frames)lens.sourceViews.push_back(frame.view);
+        if(!s.lens.Initialize(lens))Log("color lens adapter unavailable: %s",s.lens.Error().c_str());
+        else Log("color lens adapter ready; applied before editor and GPU readback");
+    }
     Log("swapchain format=%d backdrop=%d",int(s.format),s.blur.Ready());
     Log("in-game editor ready: %ux%u, %u swapchain images",s.extent.width,s.extent.height,count);return true;
 }
 Device* Find(VkDevice h) {auto i=devices.find(Key(h));return i==devices.end()?nullptr:i->second.get();}
 Device* FindQueue(VkQueue h) {auto i=devices.find(Key(h));return i==devices.end()?nullptr:i->second.get();}
 Instance* Find(VkInstance h) {auto i=instances.find(Key(h));return i==instances.end()?nullptr:i->second.get();}
+#include "depth_probe_layer.h"
 VKAPI_ATTR VkResult VKAPI_CALL CreateInstance(const VkInstanceCreateInfo* ci,const VkAllocationCallbacks* alloc,VkInstance* output) {
     auto* link=reinterpret_cast<VkLayerInstanceCreateInfo*>(const_cast<void*>(ci->pNext));
     while(link && (link->sType!=VK_STRUCTURE_TYPE_LOADER_INSTANCE_CREATE_INFO || link->function!=VK_LAYER_LINK_INFO))link=reinterpret_cast<VkLayerInstanceCreateInfo*>(const_cast<void*>(link->pNext));
@@ -726,6 +779,10 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateDevice(VkPhysicalDevice physical,const VkDe
         LOAD(CreateCommandPool) LOAD(DestroyCommandPool) LOAD(AllocateCommandBuffers) LOAD(FreeCommandBuffers) LOAD(ResetCommandBuffer) LOAD(BeginCommandBuffer) LOAD(EndCommandBuffer)
         LOAD(CmdBeginRenderPass) LOAD(CmdEndRenderPass) LOAD(CmdPipelineBarrier) LOAD(CreateFence) LOAD(DestroyFence) LOAD(WaitForFences) LOAD(ResetFences) LOAD(CreateSemaphore) LOAD(DestroySemaphore)
 #undef LOAD
+        if(cs2_camera_depth::ProbePath()) {
+            try {d->depth_probe=std::make_unique<cs2_camera_depth::Probe>(*output,gdpa);}
+            catch(...) {Log("depth provenance probe initialization failed; GPU commands remain unchanged");}
+        }
         devices[Key(*output)]=std::move(d);Log("Vulkan device attached");
     }
     return result;
@@ -743,13 +800,16 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateSwapchain(VkDevice device,const VkSwapchain
     VkSwapchainCreateInfoKHR request=*ci;
     VkSurfaceCapabilitiesKHR capabilities{};
     const bool linear_pass=ci->imageFormat==VK_FORMAT_B8G8R8A8_SRGB || ci->imageFormat==VK_FORMAT_R8G8B8A8_SRGB;
-    const bool backdrop=linear_pass && ci->imageColorSpace==VK_COLOR_SPACE_SRGB_NONLINEAR_KHR && d->instance->surface_capabilities
+    const bool color_pass=linear_pass || ci->imageFormat==VK_FORMAT_B8G8R8A8_UNORM || ci->imageFormat==VK_FORMAT_R8G8B8A8_UNORM;
+    const bool transfer=color_pass && ci->imageColorSpace==VK_COLOR_SPACE_SRGB_NONLINEAR_KHR && d->instance->surface_capabilities
         && d->instance->surface_capabilities(d->physical,ci->surface,&capabilities)==VK_SUCCESS
         && (capabilities.supportedUsageFlags&VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
-    if(backdrop)request.imageUsage|=VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    const bool backdrop=transfer && linear_pass;
+    const bool lens=transfer && ci->imageArrayLayers==1 && !(ci->flags&VK_SWAPCHAIN_CREATE_PROTECTED_BIT_KHR);
+    if(backdrop || lens)request.imageUsage|=VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     auto result=d->CreateSwapchainKHR(device,&request,alloc,output);
     if(result==VK_SUCCESS && (ci->imageUsage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)) {
-        auto s=std::make_unique<Swapchain>();s->device=d;s->handle=*output;s->format=ci->imageFormat;s->extent=ci->imageExtent;s->min_images=ci->minImageCount;s->blur_supported=backdrop;s->present_mode=ci->presentMode;
+        auto s=std::make_unique<Swapchain>();s->device=d;s->handle=*output;s->format=ci->imageFormat;s->extent=ci->imageExtent;s->min_images=ci->minImageCount;s->blur_supported=backdrop;s->lens_supported=lens;s->present_mode=ci->presentMode;
         d->swaps[*output]=std::move(s);
     }
     return result;
@@ -767,6 +827,7 @@ VKAPI_ATTR VkResult VKAPI_CALL Present(VkQueue queue,const VkPresentInfoKHR* pre
     std::lock_guard<std::recursive_mutex> lock(mutex);auto* d=FindQueue(queue);if(!d)return VK_ERROR_INITIALIZATION_FAILED;
     Swapchain* s=nullptr;uint32_t image_index=0;
     for(uint32_t i=0;i<present->swapchainCount;++i) {auto it=d->swaps.find(present->pSwapchains[i]);if(it!=d->swaps.end()){s=it->second.get();image_index=present->pImageIndices[i];break;}}
+    if(d->depth_probe && s)d->depth_probe->Present(s->extent);
     if(!s || s->failed)return d->QueuePresentKHR(queue,present);
     auto family=d->queues.find(queue);
     if(family==d->queues.end())return d->QueuePresentKHR(queue,present);
@@ -802,7 +863,9 @@ VKAPI_ATTR VkResult VKAPI_CALL Present(VkQueue queue,const VkPresentInfoKHR* pre
     try{panels_drawn=Draw(*s,image_index);}
     catch(const std::exception& error){Log("editor draw failed: %s",error.what());s->capture.Cancel();DisableOverlay(*s);return d->QueuePresentKHR(queue,present);}
     auto* draw=ImGui::GetDrawData();
-    if(!draw || !draw->TotalVtxCount){s->capture.Cancel();return d->QueuePresentKHR(queue,present);}
+    const bool lens_active=s->lens.Ready() && s->frame_lens.Active();
+    const bool ui_drawn=draw && draw->TotalVtxCount;
+    if(!ui_drawn && !lens_active && !capture){s->capture.Cancel();return d->QueuePresentKHR(queue,present);}
     std::string capture_draw;
     if(capture) {
         // Capture geometry from exactly the frame that will be copied on the
@@ -811,6 +874,8 @@ VKAPI_ATTR VkResult VKAPI_CALL Present(VkQueue queue,const VkPresentInfoKHR* pre
             {"request",s->capture.Pending()},{"image_index",image_index},{"format",int(s->format)},
             {"present_mode",int(s->present_mode)},
             {"blur",panels_drawn && s->blur.Ready() && s->frame_blur_enabled},
+            {"lens",{{"active",lens_active},{"distortion",s->frame_lens.distortion},
+                {"vignette",s->frame_lens.vignette},{"chromatic",s->frame_lens.chromatic}}},
             {"layout_only",s->capture.LayoutOnly()},{"wait_only",s->capture.WaitOnly()},
             {"cpu_delay_ms",s->capture.CpuDelay()?10:0},
             {"setup_queue_matches",queue==s->queue},{"present_wait_count",present->waitSemaphoreCount},
@@ -853,12 +918,15 @@ VKAPI_ATTR VkResult VKAPI_CALL Present(VkQueue queue,const VkPresentInfoKHR* pre
     if(!Check(d->ResetCommandBuffer(frame.cmd,0),"reset editor command buffer")){s->capture.Cancel();DisableOverlay(*s);return d->QueuePresentKHR(queue,present);}
     VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};begin.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     if(!Check(d->BeginCommandBuffer(frame.cmd,&begin),"begin editor command buffer")){s->capture.Cancel();DisableOverlay(*s);return d->QueuePresentKHR(queue,present);}
+    if(lens_active)s->lens.Record(frame.cmd,image_index,frame.image,s->frame_lens);
     if(panels_drawn && s->blur.Ready() && s->frame_blur_enabled)s->blur.Record(frame.cmd,image_index,frame.image);
-    VkRenderPassBeginInfo pass{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};pass.renderPass=s->pass;pass.framebuffer=frame.framebuffer;pass.renderArea.extent=s->extent;
-    d->CmdBeginRenderPass(frame.cmd,&pass,VK_SUBPASS_CONTENTS_INLINE);
-    try{ImGui_ImplVulkan_RenderDrawData(draw,frame.cmd);}
-    catch(const std::exception& error){Log("editor rendering failed: %s",error.what());s->capture.Cancel();DisableOverlay(*s);return d->QueuePresentKHR(queue,present);}
-    d->CmdEndRenderPass(frame.cmd);
+    if(ui_drawn) {
+        VkRenderPassBeginInfo pass{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};pass.renderPass=s->pass;pass.framebuffer=frame.framebuffer;pass.renderArea.extent=s->extent;
+        d->CmdBeginRenderPass(frame.cmd,&pass,VK_SUBPASS_CONTENTS_INLINE);
+        try{ImGui_ImplVulkan_RenderDrawData(draw,frame.cmd);}
+        catch(const std::exception& error){Log("editor rendering failed: %s",error.what());s->capture.Cancel();DisableOverlay(*s);return d->QueuePresentKHR(queue,present);}
+        d->CmdEndRenderPass(frame.cmd);
+    }
     if(s->capture.LayoutOnly())cs2_overlay_capture::Probe::LayoutRoundTrip(d->CmdPipelineBarrier,frame.cmd,frame.image);
     if(capture)s->capture.Record(frame.cmd,frame.image);
     if(d->EndCommandBuffer(frame.cmd)!=VK_SUCCESS){s->capture.Cancel();DisableOverlay(*s);return d->QueuePresentKHR(queue,present);}
@@ -967,13 +1035,15 @@ __attribute__((visibility("hidden"))) void* camera_dlsym_override(void* library,
 __attribute__((visibility("default"))) VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL CameraGetDeviceProcAddr(VkDevice device,const char* name) {
     if(std::strcmp(name,"vkGetDeviceProcAddr")==0)return reinterpret_cast<PFN_vkVoidFunction>(CameraGetDeviceProcAddr);
     if(auto fn=camera_overlay::Intercept(name))return fn;
-    std::lock_guard<std::recursive_mutex> lock(camera_overlay::mutex);auto* d=camera_overlay::Find(device);return d?d->gdpa(device,name):nullptr;
+    std::lock_guard<std::recursive_mutex> lock(camera_overlay::mutex);auto* d=camera_overlay::Find(device);
+    return camera_overlay::DepthDispatch(d?d->gdpa(device,name):nullptr,name);
 }
 __attribute__((visibility("default"))) VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL CameraGetInstanceProcAddr(VkInstance instance,const char* name) {
     if(std::strcmp(name,"vkGetInstanceProcAddr")==0)return reinterpret_cast<PFN_vkVoidFunction>(CameraGetInstanceProcAddr);
     if(std::strcmp(name,"vkGetDeviceProcAddr")==0)return reinterpret_cast<PFN_vkVoidFunction>(CameraGetDeviceProcAddr);
     if(auto fn=camera_overlay::Intercept(name))return fn;
-    std::lock_guard<std::recursive_mutex> lock(camera_overlay::mutex);auto* i=camera_overlay::Find(instance);return i?i->gipa(instance,name):nullptr;
+    std::lock_guard<std::recursive_mutex> lock(camera_overlay::mutex);auto* i=camera_overlay::Find(instance);
+    return camera_overlay::DepthDispatch(i?i->gipa(instance,name):nullptr,name);
 }
 __attribute__((visibility("default"))) VKAPI_ATTR VkResult VKAPI_CALL vkNegotiateLoaderLayerInterfaceVersion(VkNegotiateLayerInterface* version) {
     if(!version || version->sType!=LAYER_NEGOTIATE_INTERFACE_STRUCT)return VK_ERROR_INITIALIZATION_FAILED;

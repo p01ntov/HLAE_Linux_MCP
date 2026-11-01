@@ -41,6 +41,7 @@
 #include "project_store.h"
 #include "map_preview.h"
 #include "editor_preferences.h"
+#include "lens_project.h"
 
 namespace cs2_live {
 using Json = nlohmann::json;
@@ -111,6 +112,7 @@ struct Project {
     Json scene=Json::object();
     Json cosmetics=Json::object();
     Json presentation=Json::object();
+    Json lens=Json::object();
 };
 inline RenderRange StoredRenderRange(const Project& project) {
     return project.renderRange.value_or(RenderRange{"composition",0,project.duration});
@@ -163,6 +165,7 @@ inline Json ToJson(const Project& project) {
     Json result={{"name",project.name},{"start_tick",project.startTick},{"duration",project.duration},
             {"interpolation",project.interpolation},{"keys",keys},
             {"render_range",{{"mode",range.mode},{"in",range.in},{"out",range.out}}},{"scene",project.scene},{"cosmetics",project.cosmetics},{"presentation",project.presentation}};
+    if(!project.lens.empty())result["lens"]=project.lens;
     if(project.rotationInterpolation!="slerp")result["rotation_interpolation"]=project.rotationInterpolation;
     if(project.fovInterpolation!="linear")result["fov_interpolation"]=project.fovInterpolation;
     return result;
@@ -216,6 +219,7 @@ inline void Normalize(Project& project) {
     ValidateSceneSettings(project.scene);
     ValidateSupportedCosmetics(project.cosmetics);
     ValidatePresentation(project.presentation);
+    {const auto validated=NormalizeLens(project.lens);if(!project.lens.empty())project.lens=validated;}
     if (project.startTick<0 || project.startTick>2000000000) throw std::invalid_argument("invalid start_tick");
     if (project.interpolation!="linear" && project.interpolation!="smooth" && project.interpolation!="bezier") throw std::invalid_argument("interpolation must be linear, smooth or bezier");
     if(project.rotationInterpolation!="slerp" && project.rotationInterpolation!="bezier")throw std::invalid_argument("rotation_interpolation must be slerp or bezier");
@@ -254,6 +258,7 @@ inline Project ReadProject(const Json& value) {
     if(value.contains("scene")) project.scene=value.at("scene");
     if(value.contains("cosmetics")) project.cosmetics=value.at("cosmetics");
     if(value.contains("presentation")) project.presentation=value.at("presentation");
+    if(value.contains("lens"))project.lens=value.at("lens");
     if (value.contains("keys")) {
         if (!value.at("keys").is_array()) throw std::invalid_argument("keys must be an array");
         for (const auto& key:value.at("keys")) project.keys.push_back(ReadKey(key));
@@ -510,6 +515,21 @@ public:
         if (strnlen(text,MaxLine+1)>MaxLine) return;
         try { Queue(Json::parse(text)); } catch (const std::exception&) {}
     }
+    // Render-thread capability publication is independent of game-thread state.
+    // No game pointers or project edits cross this ABI callback.
+    void LensStatusText(const char* text) {
+        if(!text || strnlen(text,2049)>2048)return;
+        try {
+            const auto value=Json::parse(text);
+            if(!value.is_object() || !value.contains("available") || !value["available"].is_boolean() ||
+               value.value("backend",std::string())!="vulkan-color" || !value.contains("depth_available") ||
+               !value["depth_available"].is_boolean() || value["depth_available"].get<bool>() ||
+               !value.contains("reason") || !value["reason"].is_string() || value["reason"].get<std::string>().size()>1024)return;
+            const Json normalized={{"available",value["available"]},{"backend","vulkan-color"},
+                                   {"depth_available",false},{"reason",value["reason"]}};
+            std::lock_guard<std::mutex> lock(lensMutex_);lensRuntime_=normalized;
+        }catch(const std::exception&){}
+    }
     // Called once per FRAME_START, before all playback-related early returns.
     void Frame(bool demo,int tick,bool paused,double tickRate,bool hookInstalled,const std::string& hookError,const Execute& execute) {
         if (!enabled_) return;
@@ -702,6 +722,8 @@ private:
         const Json gloves={{"gloves",Json::array()},{"capability",removed},{"owned_overrides",0},{"stale",true}};
         cosmeticsBusy_=cosmetics.value("owned_overrides",std::size_t(0))!=0;
         const auto presentation=presentation_.State();
+        Json lensRuntime;{std::lock_guard<std::mutex> lock(lensMutex_);lensRuntime=lensRuntime_;}
+        auto liveLens=NormalizeLens(project_.lens);if(!demo_)liveLens["enabled"]=false;
         Json state={{"abi",Abi},{"connected",enabled_},{"demo",demo_},{"tick",tick_},{"tick_rate",tickRate_},
                     {"paused",paused_},{"mode",mode_},{"camera",ToJson(camera_)},{"camera_valid",cameraValid_},
                     {"project",ToJson(project_)},{"project_document_id",project_.documentId},{"project_import_receipt",projectImportReceipt_},
@@ -715,6 +737,7 @@ private:
                     {"editor_preferences_error",editorPreferencesError_},
                     {"undo_available",!undo_.empty()},{"redo_available",!redo_.empty()},
                     {"scene_capabilities",scene_.Capabilities()},{"scene_registry",sceneRegistry_},
+                    {"lens",liveLens},{"lens_runtime",lensRuntime},
                     {"appearance",{{"active",false}}},{"appearance_capabilities",{{"available",false},{"reason","global appearance packs are disabled in this build"}}},
                     {"appearance_refresh",demoRefresh_.State()},
                     {"entity_inspection_available",bool(entityInspector_)},{"entity_probe",entityProbe_},
@@ -1081,6 +1104,17 @@ private:
             if(params.contains("view")){playing_=false;mode_="free";}
             return nullptr;
         }
+        if(method=="set_lens") {
+            NeedDemo();if(params.size()!=1 || !params.contains("settings"))throw std::invalid_argument("set_lens requires settings");
+            NormalizeLens(params["settings"]);
+            Project next=project_;next.lens=NormalizeLens(next.lens);next.lens.update(params["settings"]);next.lens=NormalizeLens(next.lens);
+            if(next.lens["enabled"].get<bool>()) {
+                std::lock_guard<std::mutex> lock(lensMutex_);
+                if(!lensRuntime_.value("available",false))throw std::runtime_error("Vulkan lens preview is unavailable: "+lensRuntime_.value("reason",std::string("renderer not connected")));
+            }
+            Commit(std::move(next));return nullptr;
+        }
+        if(method=="reset_lens") {NeedDemo();Project next=project_;next.lens=Json::object();Commit(std::move(next));return nullptr;}
         if(method=="set_scene") {
             NeedDemo();
             const auto& settings=params.at("settings");ValidateSceneSettings(settings);
@@ -1306,6 +1340,7 @@ private:
     std::atomic<bool> running_{false}; int listener_=-1; std::thread worker_;
     std::string socketPath_,startupError_;
     mutable std::mutex stateMutex_; std::string stateJson_,uiStateJson_,mapPreviewJson_="{}";
+    std::mutex lensMutex_;Json lensRuntime_={{"available",false},{"backend","vulkan-color"},{"depth_available",false},{"reason","renderer not connected"}};
     std::mutex queueMutex_; std::deque<std::shared_ptr<Request>> queue_;
     std::mutex viewMutex_; Pose observed_,output_; bool observedValid_=false,outputEnabled_=false;
     std::atomic<std::uint64_t> viewWrites_{0};

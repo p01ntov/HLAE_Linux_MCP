@@ -9,6 +9,21 @@ from cs2_mvp import discovery
 
 
 class DiscoveryTests(unittest.TestCase):
+    def test_runtime_state_uses_user_data_without_mutating_environment(self):
+        original = {"XDG_DATA_HOME": "/home/test/data", "DISPLAY": ":1"}
+        result = discovery.steam_runtime_environment(original)
+        self.assertEqual(result["PRESSURE_VESSEL_VARIABLE_DIR"], "/home/test/data/steam-runtime-sniper-var")
+        self.assertNotIn("PRESSURE_VESSEL_VARIABLE_DIR", original)
+        self.assertEqual(result["DISPLAY"], ":1")
+
+    def test_runtime_explicit_override_is_preserved_and_relative_xdg_is_ignored(self):
+        override = {"PRESSURE_VESSEL_VARIABLE_DIR": "/custom/runtime-state"}
+        self.assertEqual(discovery.steam_runtime_environment(override), override)
+        with patch.object(Path, "home", return_value=Path("/home/test")):
+            for value in ("", "relative/path"):
+                self.assertEqual(discovery.steam_runtime_environment({"XDG_DATA_HOME": value})["PRESSURE_VESSEL_VARIABLE_DIR"],
+                                 "/home/test/.local/share/steam-runtime-sniper-var")
+
     def demo_bytes(self):
         # Structurally complete framing with a final DEM_FileInfo command.
         return b"PBDEMS2\0"+struct.pack("<II",19,0)+bytes([1,0,0,2,0,0])

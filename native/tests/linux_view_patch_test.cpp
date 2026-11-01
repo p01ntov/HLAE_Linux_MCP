@@ -16,7 +16,7 @@ static int FindMapped(const void* address, Dl_info* info);
 
 namespace {
 unsigned char* mapped = nullptr;
-constexpr std::size_t MappedSize = 0x1939000;
+constexpr std::size_t MappedSize = 0x193b000;
 dl_phdr_info module{};
 ElfW(Phdr) segments[2]{};
 int moduleCount = 1;
@@ -89,6 +89,7 @@ int main() {
     assert(Patch::IsValidatedBuildId(Patch::BuildId.data(), Patch::BuildId.size()));
     assert(Patch::IsValidatedBuildId(Patch::PreviousBuildId.data(), Patch::PreviousBuildId.size()));
     assert(!Patch::IsValidatedBuildId(Patch::CurrentBuildId.data(), Patch::CurrentBuildId.size()));
+    assert(!Patch::IsValidatedBuildId(Patch::LatestBuildId.data(), Patch::LatestBuildId.size()));
     for (const auto& profile : Patch::Profiles)
         assert(Patch::IsValidatedViewBuildId(profile.buildId.data(), profile.buildId.size()));
     assert(!Patch::IsValidatedViewBuildId(nullptr, Patch::BuildId.size()));
@@ -147,6 +148,16 @@ int main() {
     segments[1].p_vaddr = Patch::Profiles[0].viewFunction;
     segments[1].p_memsz = Patch::Profiles[0].guardEnd - segments[1].p_vaddr;
     MustReject();
+    // Latest authorization cannot inherit a former profile's bytes/range.
+    for (const auto& previous : {Patch::Profiles[0], Patch::Profiles[2]}) {
+        Fixture(Patch::LatestBuildId);
+        std::memcpy(mapped + Patch::LatestSite, previous.original.data(), previous.original.size());
+        MustReject();
+        Fixture(Patch::LatestBuildId);
+        segments[1].p_vaddr = previous.viewFunction;
+        segments[1].p_memsz = previous.guardEnd - previous.viewFunction;
+        MustReject();
+    }
     // GNU notes may appear after the executable program header.
     Fixture(Patch::CurrentBuildId);
     const auto first = segments[0]; segments[0] = segments[1]; segments[1] = first;

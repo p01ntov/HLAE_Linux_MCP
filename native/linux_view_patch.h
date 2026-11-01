@@ -45,6 +45,20 @@ public:
         0x48,0x8d,0x05,0x11,0x2d,0x00,0x03,0x48,0x8b,0x38,
         0x48,0x8b,0x07,0xff,0x90,0x50,0x01,0x00,0x00};
 
+    // Steam 26334290 / 1.41.9.4. Independently checked instruction boundaries,
+    // argument retention, bool-result branch, origin/angles and FOV accesses.
+    // libclient.so SHA-256:
+    // 8b319dfec7d63e2de18962685ddcdbf45f943f0a7e7fcbb4e3fe86814fb73ad2.
+    // tools/revalidate_linux_client.py reproduces these offline ELF checks.
+    static constexpr const char* LatestBuildIdText = "c6c5098eab52964d9d088279ca5cc991c76d1a7d";
+    static constexpr std::array<unsigned char, 20> LatestBuildId = {
+        0xc6,0xc5,0x09,0x8e,0xab,0x52,0x96,0x4d,0x9d,0x08,
+        0x82,0x79,0xca,0x5c,0xc9,0x91,0xc7,0x6d,0x1a,0x7d};
+    static constexpr std::uintptr_t LatestSite = 0x1939920;
+    static constexpr std::array<unsigned char, 19> LatestOriginal = {
+        0x48,0x8d,0x05,0x11,0x44,0x00,0x03,0x48,0x8b,0x38,
+        0x48,0x8b,0x07,0xff,0x90,0x50,0x01,0x00,0x00};
+
     struct BuildProfile {
         const char* buildIdText;
         std::array<unsigned char, 20> buildId;
@@ -53,7 +67,7 @@ public:
         bool checkAbi;
     };
 
-    inline static constexpr std::array<BuildProfile, 3> Profiles = {{
+    inline static constexpr std::array<BuildProfile, 4> Profiles = {{
         {BuildIdText, BuildId, 0x1936e40, Site, 0x1937490, 0x19374ab,
          0x1937216, 0x1937538, 0x1937541, Original, true},
         {"d5bacd2f5df4a3a68fa8bee8692337993548e14a", PreviousBuildId,
@@ -62,6 +76,9 @@ public:
         {CurrentBuildIdText, CurrentBuildId, 0x1938080, CurrentSite,
          0x19386d0, 0x19386eb, 0x1938456, 0x1938778, 0x1938781,
          CurrentOriginal, true},
+        {LatestBuildIdText, LatestBuildId, 0x1939300, LatestSite,
+         0x1939950, 0x193996b, 0x19396d6, 0x19399f8, 0x1939a01,
+         LatestOriginal, true},
     }};
 
     static const BuildProfile* ValidatedProfile(const unsigned char* bytes, std::size_t size) {
@@ -98,7 +115,7 @@ public:
             || std::memcmp(reinterpret_cast<void*>(search.base + profile.anglesRead), anglesRead, sizeof(anglesRead)) != 0)
             return "Linux main-view instructions/layout do not match the validated build";
         if (profile.checkAbi) {
-            // Revalidated in 26087496 and 26144732: the second SysV argument is retained in
+            // Revalidated in 26087496, 26144732 and 26334290: the second SysV argument is retained in
             // r14, the original bool result is tested immediately after our
             // replacement call, and FOV is initialized/read as float at 0x498.
             const unsigned char prologue[]{

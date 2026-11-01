@@ -127,7 +127,8 @@ def validate_motion_log(log: str, expected_frames: int, expected_fov: float | di
             or len(builds) != 1 or builds[0] not in {
                 "d5bacd2f5df4a3a68fa8bee8692337993548e14a",
                 "f1e04e3616921a3bb25940eea9b4b6bfd7ccada5",
-                "f00942ca6d0c486d11f988c53381c47a5be27143"}
+                "f00942ca6d0c486d11f988c53381c47a5be27143",
+                "c6c5098eab52964d9d088279ca5cc991c76d1a7d"}
             or len(view) != 1 or int(view[0][1]) != 0 or abs(int(view[0][0]) - expected_frames) > 2
             or int(view[0][2]) != tick):
         raise RuntimeError("Late Linux main-view writes were not confirmed for every captured camera pose")

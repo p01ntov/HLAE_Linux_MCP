@@ -141,6 +141,9 @@ class Audit:
         render = self.run("render-help", [self.app / "AppRun", "render", "--help"])
         self.check("render_help_features", all(flag in render for flag in
                    ("--width", "--height", "--crf", "--video-bitrate-mbps", "--capture-fps", "--format")))
+        follow = self.run("follow-help", [self.app / "AppRun", "follow-draft", "--help"])
+        self.check("follow_help_features", all(flag in follow for flag in
+                   ("--player", "--start", "--end", "--mode", "--on-loss", "--output")))
         index = self.run("index-maps-help", [self.app / "AppRun", "index-maps", "--help"])
         self.check("map_help_features", all(flag in index for flag in ("--cache-root", "--bootstrap-tool", "--map", "--game-dir")))
         messages = [

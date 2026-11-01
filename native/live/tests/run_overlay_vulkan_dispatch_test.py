@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Compile actual overlay helpers against pinned ImGui; never launch CS2."""
 from pathlib import Path
+import os
 import subprocess
 import tempfile
 
@@ -20,4 +21,8 @@ with tempfile.TemporaryDirectory(prefix="cs2-overlay-dispatch-test-") as tempora
         *(str(imgui / name) for name in ("imgui.cpp", "imgui_draw.cpp", "imgui_widgets.cpp", "imgui_tables.cpp")),
         str(imgui / "backends/imgui_impl_vulkan.cpp"), "-ldl", "-pthread", "-o", str(binary),
     ], check=True, timeout=120)
-    subprocess.run([str(binary)], check=True, timeout=15)
+    environment = dict(os.environ)
+    environment.pop("CS2_CAMERA_DEPTH_PROBE", None)
+    subprocess.run([str(binary)], env=environment, check=True, timeout=15)
+    subprocess.run([str(binary)], env=dict(environment, CS2_CAMERA_DEPTH_PROBE=str(Path(temporary) / "depth.jsonl")),
+                   check=True, timeout=15)

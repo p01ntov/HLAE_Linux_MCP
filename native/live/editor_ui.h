@@ -192,6 +192,7 @@ class EditorUi {
   int saved_shot_observed_revision_=-1;
   double pending_shot_time_ = 0;
   Json scene_capabilities_;
+  Json lens_settings_,lens_runtime_;std::unordered_map<std::string,float> lens_drafts_;
   CameraMapUi camera_map_;
   CameraCurveUi camera_curves_;
   CameraTimelineUi camera_timeline_;
@@ -342,6 +343,7 @@ class EditorUi {
     safe_exit_error_=String(Member(Member(state,"safe_exit"),"error"));
     hotkeys_ = Member(state, "hotkeys");
     scene_capabilities_ = Member(state, "scene_capabilities");
+    lens_settings_=Member(state,"lens");lens_runtime_=Member(state,"lens_runtime");
     // Revision is shared by unrelated edits. A scene value is acknowledged
     // only by its own engine readback, never merely by a newer revision.
     for(auto it=scene_pending_.begin();it!=scene_pending_.end();) {
@@ -742,6 +744,32 @@ class EditorUi {
     ImGui::PushStyleColor(ImGuiCol_Text,ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
     ImGui::TextWrapped("%s",text);
     ImGui::PopStyleColor();
+  }
+  void DrawLensSettings(const Send& send) {
+    if(!ImGui::CollapsingHeader("Lens finishing"))return;
+    const bool available=Boolean(Member(lens_runtime_,"available"));
+    if(!available)SceneHint(String(Member(lens_runtime_,"reason"),"Renderer not connected").c_str());
+    bool enabled=Boolean(Member(lens_settings_,"enabled"));
+    ImGui::BeginDisabled(!demo_ || (!available&&!enabled));
+    if(ImGui::Checkbox("Enable lens finishing",&enabled))Emit(send,"set_lens",{{"settings",{{"enabled",enabled}}}});
+    ImGui::EndDisabled();
+    ImGui::BeginDisabled(!demo_ || !available);
+    const char* names[]={"distortion","vignette","chromatic"};
+    const char* labels[]={"Barrel / pincushion","Vignette","Chromatic separation (px)"};
+    const float lows[]={-.75f,0,0},highs[]={.75f,1,8};
+    for(int i=0;i<3;++i) {
+      const std::string id=std::string("##lens_")+names[i];
+      auto& value=lens_drafts_[names[i]];const auto active=ImGui::GetActiveID();
+      if(active!=ImGui::GetID(id.c_str()))value=float(ExactNumber(Member(lens_settings_,names[i])));
+      Caption(labels[i]);ImGui::SetNextItemWidth(-1);
+      ImGui::SliderFloat(id.c_str(),&value,lows[i],highs[i],i==0?"%.3f":"%.2f");
+      if(ImGui::IsItemDeactivatedAfterEdit())Emit(send,"set_lens",{{"settings",{{names[i],value}}}});
+    }
+    ImGui::EndDisabled();
+    ImGui::BeginDisabled(!demo_);
+    if(ImGui::Button("Reset lens finishing",ImVec2(-1,0)))Emit(send,"reset_lens");
+    ImGui::EndDisabled();
+    SceneHint("Color finishing is applied to preview and export. Focus and scene lighting are below.");
   }
   void DrawSceneSettings(const Send& send) {
     if (!scene_capabilities_.is_object() || scene_capabilities_.empty()) return;
@@ -1445,7 +1473,7 @@ class EditorUi {
     if(!connected_){Caption("Waiting for game");if(ImGui::Button("Refresh connection")&&send&&ImGui::GetTime()-last_refresh_>.5){send("get_state",Json::object());last_refresh_=ImGui::GetTime();}}
     else Caption(!demo_?"No demo loaded":mode_=="preview"?"Playing camera preview":mode_=="hold"?"Camera held":"Free camera");
     ImGui::BeginDisabled(!connected_);
-    if(inspector_section_=="scene"){DrawPresentation(send);DrawSceneSettings(send);DrawCosmetics(send);}
+    if(inspector_section_=="scene"){DrawPresentation(send);DrawLensSettings(send);DrawSceneSettings(send);DrawCosmetics(send);}
     else if(inspector_section_=="shot")DrawShotInspector(state,send);
     else DrawCameraInspector(send);
     ImGui::EndDisabled();

@@ -74,18 +74,20 @@ class CameraBackendTests(unittest.TestCase):
         previous="d5bacd2f5df4a3a68fa8bee8692337993548e14a"
         current="f1e04e3616921a3bb25940eea9b4b6bfd7ccada5"
         updated="f00942ca6d0c486d11f988c53381c47a5be27143"
+        latest="c6c5098eab52964d9d088279ca5cc991c76d1a7d"
         prefix=("CS2_MVP_MOTION_ABI 3\nCS2_MVP_CAMERA_BEGIN expected=120 tick=1000\n"
                 "CS2_MVP_CAMERA_STAGE FRAME_START_LINUX_MAIN_VIEW\n")
         suffix=("CS2_MVP_CAMERA_END applied=120 expected=120 callbacks=120 overflow=0 tick=1064 reason=camera_end\n"
                 "CS2_MVP_VIEW_END writes=120 fault=0 tick=1064\n")
         def hook(build):
             return "CS2_MVP_VIEW_HOOK linux_build="+build+"\n"
-        for build in (previous,current,updated):
+        for build in (previous,current,updated,latest):
             with self.subTest(build=build):
                 self.assertEqual(validate_motion_log(prefix+hook(build)+suffix,120)["client_build_id"],build)
         for records in ("",hook("0"*40),hook("not-a-build-id"),hook(current)+hook(current),
                         hook(previous)+hook(current),hook(current)+hook(updated),hook(current)+hook("0"*40),hook(current+"-extra"),
-                        hook(current)+hook("not-a-build-id"),hook(current)+hook("")):
+                        hook(current)+hook("not-a-build-id"),hook(current)+hook(""),hook(latest)+hook(latest),
+                        hook(updated)+hook(latest),hook(latest+"-extra"),hook(latest[:-1]+"0")):
             with self.subTest(records=records),self.assertRaisesRegex(RuntimeError,"Late Linux main-view"):
                 validate_motion_log(prefix+records+suffix,120)
 

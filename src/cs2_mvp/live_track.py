@@ -184,6 +184,8 @@ class LiveTrack:
             raise ValueError("Live project start_tick must be an integer within 0..2000000000")
         self.duration = _number(project.get("duration", 5), "duration", .01, 86400)
         self.render_range = normalize_render_range(project.get("render_range", {}), self.duration)
+        from .lens_effects import validate_lens
+        self.lens = validate_lens(project.get("lens", {}))
         self.interpolation = project.get("interpolation", "smooth")
         if not isinstance(self.interpolation, str) or self.interpolation not in {"linear", "smooth", "bezier"}:
             raise ValueError("Live project interpolation must be linear, smooth or bezier")

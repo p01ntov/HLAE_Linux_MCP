@@ -45,7 +45,7 @@ def source_fingerprint() -> str:
                  HERE / "cosmetics_catalog.h", HERE / "player_cosmetics.h", HERE / "cosmetics_runtime.h",
                  HERE / "presentation.h", HERE / "presentation_runtime.h", HERE / "observer_player.h", HERE / "hud_presentation.h",
                  HERE / "live_telemetry.h", HERE / "demo_timeline.h", HERE / "demo_playback_range.h", HERE / "project_store.h",
-                 HERE / "demo_refresh.h", HERE / "map_preview.h", HERE / "editor_preferences.h",
+                 HERE / "demo_refresh.h", HERE / "map_preview.h", HERE / "editor_preferences.h", HERE / "lens_project.h",
                  HERE / "compat_math.cpp", HERE / "live_exports.map", Path(__file__).resolve()):
         value.update(path.name.encode())
         value.update(path.read_bytes())
@@ -153,7 +153,7 @@ def apply_patches(source: Path) -> None:
     for patch in (NATIVE / "csdm-motion.patch", HERE / "csdm-live.patch"):
         run(["git", "apply", "--check", str(patch)], source)
         run(["git", "apply", str(patch)], source)
-    for path in (NATIVE / "motion_track.h", NATIVE / "linux_view_patch.h", NATIVE / "capture_environment.h", NATIVE / "capture_cosmetics.h", HERE / "live_controller.h", HERE / "scene_environment.h", HERE / "team_palette.h", HERE / "client_build_profile.h", HERE / "cosmetics_catalog.h", HERE / "player_cosmetics.h", HERE / "cosmetics_runtime.h", HERE / "presentation.h", HERE / "presentation_runtime.h", HERE / "observer_player.h", HERE / "hud_presentation.h", HERE / "live_telemetry.h", HERE / "demo_timeline.h", HERE / "demo_playback_range.h", HERE / "project_store.h", HERE / "demo_refresh.h", HERE / "map_preview.h", HERE / "editor_preferences.h", HERE / "compat_math.cpp", HERE / "live_exports.map"):
+    for path in (NATIVE / "motion_track.h", NATIVE / "linux_view_patch.h", NATIVE / "capture_environment.h", NATIVE / "capture_cosmetics.h", HERE / "live_controller.h", HERE / "scene_environment.h", HERE / "team_palette.h", HERE / "client_build_profile.h", HERE / "cosmetics_catalog.h", HERE / "player_cosmetics.h", HERE / "cosmetics_runtime.h", HERE / "presentation.h", HERE / "presentation_runtime.h", HERE / "observer_player.h", HERE / "hud_presentation.h", HERE / "live_telemetry.h", HERE / "demo_timeline.h", HERE / "demo_playback_range.h", HERE / "project_store.h", HERE / "demo_refresh.h", HERE / "map_preview.h", HERE / "editor_preferences.h", HERE / "lens_project.h", HERE / "compat_math.cpp", HERE / "live_exports.map"):
         shutil.copyfile(path, source / RELATIVE / path.name)
     marker.write_text(digest(main) + "\n")
 
