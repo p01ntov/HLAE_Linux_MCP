@@ -70,7 +70,7 @@ class Fixture{
         if(method=="update_key")for(auto& key:state["project"]["keys"])if(key["id"]==value["id"])key.update(value);
         if(method=="set_editor_preferences")state["editor_preferences"].update(value);
       };
-      auto select=[&](const std::string& id){selected=id;};
+      auto select=[&](const std::string& id,bool=false){selected=id;};
       auto backdrop=[&]{++backdrop_calls;if(ImGui::GetCurrentWindow()->Flags&ImGuiWindowFlags_Popup)++popup_backdrops;};
       auto numeric=[&](const char* label,double* value,double,double,const char* format){
         ImGui::InputDouble(label,value,0,0,format);
@@ -134,7 +134,7 @@ void EmbeddedGestures(){
     const char* label=tool==Map?"##map_handle_1":tool==Curves?"##curve_key_1":"##composition_key_Position_1";
     f.Drag(label,35,tool==Curves?-18.f:0.f);
     Require(f.commands.size()==1,"Embedded gesture did not commit exactly one edit");
-    Require(f.commands[0].method==(tool==Curves?"set_project":"update_key"),"Embedded gesture changed its command contract");
+    Require(f.commands[0].method==(tool==Map?"update_key":"set_project"),"Embedded gesture changed its command contract");
     Require(f.selected=="1","Embedded gesture lost shared selection");
     f.commands.clear();f.Step();f.Drag(label,24,tool==Curves?-18.f:0.f,true);
     Require(f.commands.empty(),"ResetGesture committed a hidden tool's pending edit");

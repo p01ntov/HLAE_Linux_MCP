@@ -82,6 +82,43 @@ class NativeSocketTests(unittest.TestCase):
         self.assertEqual(live.MAX_MESSAGE, 1024 * 1024)
         self.assertEqual(live.MAX_RESPONSE, 4 * 1024 * 1024)
 
+    def test_unicode_project_uses_the_native_utf8_byte_budget(self):
+        project = {"name": "Камера", "start_tick": 1000, "duration": 5, "interpolation": "linear",
+                   "keys": [{"id": "🐈" * 30 + str(index), "time": index / 1024,
+                             "position": [0, 0, 64], "angles": [0, 0, 0], "fov": 90,
+                             "easing": [0, 0, 1, 1]} for index in range(3000)]}
+        self.assertGreater(len(json.dumps(project, separators=(",", ":")).encode()), live.MAX_MESSAGE)
+        self.assertLess(len(json.dumps(project, ensure_ascii=False, separators=(",", ":")).encode()), live.MAX_MESSAGE - 16384)
+        def respond(connection, request):
+            self.assertEqual(request["params"]["project"], project)
+            connection.sendall(json.dumps({"id": request["id"], "result": {"imported": True}}).encode() + b"\n")
+        client, _ = self.exchange(respond)
+        self.assertEqual(client.request("import_project", {"project": project}), {"imported": True})
+
+    def test_disconnected_mutation_reports_unknown_outcome(self):
+        client, _ = self.exchange(lambda connection, request: None)
+        with self.assertRaisesRegex(live.LiveError, "outcome is unknown.*do not retry blindly"):
+            client.request("set_camera", {"fov": 80})
+
+    def test_timed_out_mutation_reports_unknown_outcome(self):
+        release = threading.Event()
+        self.addCleanup(release.set)
+        client, _ = self.exchange(lambda connection, request: release.wait(1))
+        client.timeout = .05
+        try:
+            with self.assertRaisesRegex(live.LiveError, "outcome is unknown.*do not retry blindly"):
+                client.request("set_camera", {"fov": 80})
+        finally:
+            release.set()
+
+    def test_native_cancellation_is_not_reported_as_unknown(self):
+        def respond(connection, request):
+            connection.sendall(json.dumps({"id": request["id"], "error": {"message": "cancelled before execution"}}).encode() + b"\n")
+        client, _ = self.exchange(respond)
+        with self.assertRaises(live.LiveError) as raised:
+            client.request("set_camera", {"fov": 80})
+        self.assertEqual(str(raised.exception), "cancelled before execution")
+
     def test_native_error_is_actionable(self):
         def respond(connection, request):
             connection.sendall(json.dumps({"id": request["id"], "error": {"message": "Add a key before preview"}}).encode() + b"\n")

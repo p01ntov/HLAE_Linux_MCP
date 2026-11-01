@@ -17,6 +17,7 @@
 #include <vector>
 #include "camera_map_ui.h"
 #include "camera_timeline_ui.h"
+#include "project_browser_ui.h"
 
 // Native CS2 cinematic editor. All effects leave the UI through Send; neither
 // rendering nor editing opens sockets, touches the game, or writes project files.
@@ -83,7 +84,11 @@ class EditorUi {
     }
     last_draw_frame_ = frame;
     const ImVec2 display = ImGui::GetIO().DisplaySize;
-    if (display.x < 320.0f || display.y < 240.0f) return;
+    if (display.x < 320.0f || display.y < 240.0f) {
+      // Releases can arrive while a minimized/resized surface is not drawn.
+      // Discard its drafts now rather than committing them after restoration.
+      CancelEditorGesture();return;
+    }
     // Panorama's native demo controller is authored against a 1080px viewport.
     editor_preferences_=Member(state,"editor_preferences");
     scale_ = display.y / 1080.0f * float(PreferenceNumber("ui_scale",1,.75,1.5));
@@ -140,6 +145,10 @@ class EditorUi {
   bool shortcuts_focus_requested_ = false;
   bool project_browser_requested_ = false;
   std::string project_browser_id_;
+  char project_browser_search_[256] = {};
+  bool project_browser_compatible_ = false;
+  ProjectBrowserIndex::Sort project_browser_sort_ = ProjectBrowserIndex::Sort::Recent;
+  ProjectBrowserIndex project_browser_index_;
   Json project_library_, project_storage_;
   int tick_ = 0, tick_rate_ = 64, revision_ = 0, last_draw_frame_ = -1;
   float cursor_ = 0, duration_ = 8, draft_duration_ = 8;
@@ -297,7 +306,7 @@ class EditorUi {
     graph_handle_ = -1;
     if (const Key* key = Selected()) {
       draft_ = *key;
-      draft_target_ = id;
+      draft_target_ = "key:"+id;
     }
   }
   void ReadState(const Json& state) {
@@ -406,7 +415,7 @@ class EditorUi {
       timeline_drag_id_.clear();
     }
     const Key* selected = Selected();
-    const std::string target = inspect_key_ && selected ? selected->id : "@camera";
+    const std::string target = inspect_key_ && selected ? "key:"+selected->id : "camera";
     const bool pending = revision_ == pending_revision_ &&
                          ImGui::GetTime() < pending_until_;
     if (target != draft_target_) {
@@ -1331,7 +1340,11 @@ class EditorUi {
     ImGui::Begin("##CS2CameraWorkspace",nullptr,kPanelFlags|ImGuiWindowFlags_NoBackground);
     DrawBackdrop(false);FontScale();
     const auto route=[&](const std::string& method,const Json& args){Emit(send,method.c_str(),args);};
-    const auto select=[&](const std::string& id){if(id=="@camera"){CancelNumericScrub();numeric_edits_.clear();inspect_key_=false;draft_target_.clear();}else Select(id);};
+    const auto select=[&](const std::string& id){Select(id);};
+    const auto map_select=[&](const std::string& id,bool live){
+      if(live){CancelNumericScrub();numeric_edits_.clear();inspect_key_=false;draft_target_.clear();}
+      else Select(id);
+    };
     const auto background=[&]{DrawBackdrop(false);};
     const auto number=[&](const char* label,double* value,double lo,double hi,const char* format){return NumericField(label,value,lo,hi,format);};
     if(workspace_source_=="demo"||demo_navigation_pinned_){
@@ -1343,7 +1356,7 @@ class EditorUi {
       const char* child=workspace_tool_=="map"?"Camera map / XY":workspace_tool_=="curves"?"Camera curves / values":"Camera timeline / composition";
       if(ImGui::BeginChild(child,ImVec2(0,0),ImGuiChildFlags_None,ImGuiWindowFlags_NoBackground|ImGuiWindowFlags_HorizontalScrollbar)){
         camera_map_.visible=workspace_tool_=="map";camera_curves_.visible=workspace_tool_=="curves";camera_timeline_.visible=workspace_tool_=="timeline";
-        if(workspace_tool_=="map")camera_map_.Draw(state,route,selected_id_,select,scale_,background,true);
+        if(workspace_tool_=="map")camera_map_.Draw(state,route,selected_id_,map_select,scale_,background,true);
         else if(workspace_tool_=="curves"){
           if(timing_view_){if(NavigationButton("Values",ImVec2(S(90),S(36)))){CancelEditorGesture();timing_view_=false;}}else AccentButton("Values",ImVec2(S(90),S(36)));
           ImGui::SameLine();if(!timing_view_){if(NavigationButton("Timing",ImVec2(S(90),S(36)))){CancelEditorGesture();timing_view_=true;}}else AccentButton("Timing",ImVec2(S(90),S(36)));
@@ -1519,7 +1532,7 @@ class EditorUi {
     ImGui::EndDisabled();
     // Switching targets must update this frame, before any input can edit it.
     const Key* selected = Selected();
-    const std::string target = inspect_key_ && selected ? selected->id : "@camera";
+    const std::string target = inspect_key_ && selected ? "key:"+selected->id : "camera";
     if (draft_target_ != target) {
       CancelNumericScrub();
       numeric_edits_.clear();
@@ -1931,39 +1944,77 @@ class EditorUi {
     if(project_browser_requested_) {
       ImGui::OpenPopup("Camera projects");project_browser_requested_=false;
     }
-    ImGui::SetNextWindowSize(ImVec2(S(900),S(570)),ImGuiCond_Appearing);
     const auto display=ImGui::GetIO().DisplaySize;
+    const ImVec2 maxSize(std::max(1.0f,display.x-S(24)),std::max(1.0f,display.y-S(24)));
+    ImGui::SetNextWindowSize(ImVec2(std::min(S(900),maxSize.x),std::min(S(630),maxSize.y)),ImGuiCond_Appearing);
+    ImGui::SetNextWindowSizeConstraints(ImVec2(std::min(S(780),maxSize.x),std::min(S(520),maxSize.y)),maxSize);
     ImGui::SetNextWindowPos(ImVec2(display.x*.5f,display.y*.5f),ImGuiCond_Appearing,ImVec2(.5f,.5f));
     bool open=true;
     if(!ImGui::BeginPopupModal("Camera projects",&open,ImGuiWindowFlags_NoSavedSettings|ImGuiWindowFlags_NoCollapse))return;
     DrawBackdrop();FontScale();
-    ImGui::TextUnformatted("Saved projects / recent first");
+    ImGui::TextUnformatted("Saved projects");
     const auto directory=String(Member(project_library_,"directory"));
-    if(!directory.empty())ImGui::TextWrapped("Folder: %s",directory.c_str());
+    if(!directory.empty()) {
+      // An arbitrarily long configured path must not push the browser controls
+      // off screen. Keep one line, with the complete directory in its tooltip.
+      const std::string folder="Folder: "+directory;
+      const float available=ImGui::GetContentRegionAvail().x;
+      const auto position=ImGui::GetCursorScreenPos();
+      ImGui::PushStyleColor(ImGuiCol_Text,ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+      ImGui::RenderTextEllipsis(ImGui::GetWindowDrawList(),position,ImVec2(position.x+available,position.y+ImGui::GetTextLineHeight()),
+                                position.x+available,position.x+available,folder.c_str(),nullptr,nullptr);
+      ImGui::PopStyleColor();ImGui::Dummy(ImVec2(available,ImGui::GetTextLineHeight()));Tip(directory.c_str());
+    }
     if(ImGui::Button("Refresh projects"))Emit(send,"refresh_project_library");
     ImGui::SameLine();if(ImGui::Button("Save current project"))Emit(send,"save_project");
     ImGui::SameLine();if(ImGui::Button("Save a new copy"))Emit(send,"save_project_copy");
     const auto libraryError=String(Member(project_library_,"error"));
-    if(!libraryError.empty())ImGui::TextWrapped("%s",libraryError.c_str());
-    if(!error_.empty())ImGui::TextWrapped("%s",error_.c_str());
     const Json& entries=Member(project_library_,"entries");
+    ImGui::SetNextItemWidth(std::max(S(100),ImGui::GetContentRegionAvail().x-S(130)));
+    ImGui::InputTextWithHint("##project_search","Search title, project ID or demo filename",project_browser_search_,sizeof(project_browser_search_));
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!project_browser_search_[0] && !project_browser_compatible_);
+    if(ImGui::Button("Clear filters",ImVec2(S(120),0))){project_browser_search_[0]=0;project_browser_compatible_=false;}
+    ImGui::EndDisabled();
+    ImGui::Checkbox("Compatible only",&project_browser_compatible_);
+    Tip("Includes projects without recording metadata. Their recording compatibility is unknown; they open with the current demo.");
+    ImGui::SameLine();ImGui::TextUnformatted("Sort:");ImGui::SameLine();ImGui::SetNextItemWidth(S(120));
+    if(ImGui::BeginCombo("##project_sort",project_browser_sort_==ProjectBrowserIndex::Sort::Recent?"Recent":"Name")) {
+      if(ImGui::Selectable("Recent",project_browser_sort_==ProjectBrowserIndex::Sort::Recent))project_browser_sort_=ProjectBrowserIndex::Sort::Recent;
+      if(ImGui::Selectable("Name",project_browser_sort_==ProjectBrowserIndex::Sort::Name))project_browser_sort_=ProjectBrowserIndex::Sort::Name;
+      ImGui::EndCombo();
+    }
+    const auto& visible=project_browser_index_.Filter(entries,project_browser_search_,project_browser_compatible_,project_browser_sort_);
+    ImGui::SameLine();ImGui::TextDisabled("%zu / %zu projects",visible.size(),project_browser_index_.Size());
     const Json* selected=nullptr;
-    if(entries.is_array())for(const auto& entry:entries)if(String(Member(entry,"id"))==project_browser_id_)selected=&entry;
+    // A retained selection is actionable only when it is still visible. Never
+    // load a stale hidden item because the user has narrowed their search.
+    for(const auto row:visible) {
+      const auto& entry=project_browser_index_.Entry(row);
+      if(String(Member(entry,"id"))==project_browser_id_)selected=&entry;
+    }
     ImGui::Separator();
-    const float listHeight=std::max(S(180),ImGui::GetContentRegionAvail().y-S(64));
-    ImGui::BeginChild("##saved_project_list",ImVec2(S(370),listHeight),ImGuiChildFlags_Borders);
-    if(entries.is_array())for(const auto& entry:entries) {
+    const float listHeight=std::max(S(80),ImGui::GetContentRegionAvail().y-S(58));
+    ImGui::BeginChild("##saved_project_list",ImVec2(ImGui::GetContentRegionAvail().x*.44f,listHeight),ImGuiChildFlags_Borders);
+    for(const auto row:visible) {
+      const auto& entry=project_browser_index_.Entry(row);
       const auto id=String(Member(entry,"id"));
-      if(id.empty())continue;
       const auto title=String(Member(entry,"title"),id.c_str());
-      ImGui::PushID(id.c_str());
-      if(ImGui::Selectable(title.c_str(),id==project_browser_id_)){project_browser_id_=id;selected=&entry;}
+      ImGui::PushOverrideID(ImHashData(id.data(),id.size(),ImGui::GetID("##project_entry")));
+      if(ImGui::Selectable((title+"###project_row").c_str(),id==project_browser_id_)){project_browser_id_=id;selected=&entry;}
+      Tip(id.c_str());
       ImGui::TextDisabled("%d keys  /  %.2f s",Integer(Member(entry,"key_count")),ExactNumber(Member(entry,"duration")));
+      const auto filename=ProjectDemoFilename(String(Member(Member(entry,"demo"),"path")));
+      if(!filename.empty())ImGui::TextDisabled("%s",filename.c_str());
       ImGui::PopID();
     }
-    if(!entries.is_array() || entries.empty())ImGui::TextWrapped("No saved projects yet. Save your current camera shot, or place portable project JSON files in this folder.");
+    if(!project_browser_index_.Size())ImGui::TextWrapped("No saved projects yet. Save your current camera shot, or place portable project JSON files in this folder.");
+    else if(visible.empty())ImGui::TextWrapped("No projects match these filters. Clear filters to show all saved projects.");
     ImGui::EndChild();ImGui::SameLine();
     ImGui::BeginChild("##saved_project_details",ImVec2(0,listHeight));
+    if(!libraryError.empty())ImGui::TextWrapped("%s",libraryError.c_str());
+    if(!error_.empty())ImGui::TextWrapped("%s",error_.c_str());
+    if(!libraryError.empty() || !error_.empty())ImGui::Separator();
     if(selected) {
       ImGui::TextWrapped("%s",String(Member(*selected,"title")).c_str());
       ImGui::TextWrapped("%s.json",project_browser_id_.c_str());
@@ -1978,7 +2029,8 @@ class EditorUi {
       if(!reason.empty())ImGui::TextWrapped("%s",reason.c_str());
       else if(!warning.empty())ImGui::TextWrapped("%s",warning.c_str());
       else ImGui::TextWrapped("Recorded camera motion, FOV, timing curves, scene settings and render range are restored together. Undo restores your current project.");
-    }else ImGui::TextWrapped("Choose a project to inspect its camera track and recording.");
+    }else if(project_browser_index_.Contains(project_browser_id_))ImGui::TextWrapped("Your selected project is hidden by the filters. Clear filters or choose a visible project.");
+    else ImGui::TextWrapped("Choose a project to inspect its camera track and recording.");
     const int skipped=Integer(Member(project_library_,"skipped"));
     if(skipped)ImGui::TextWrapped("Skipped %d invalid or unavailable files.",skipped);
     if(Boolean(Member(project_library_,"truncated")))ImGui::TextWrapped("Folder scan reached its limit. Move older files to an archive and refresh.");

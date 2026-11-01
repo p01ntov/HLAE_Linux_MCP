@@ -24,8 +24,8 @@ static std::string ResourceHeader(std::size_t payloadSize) {
 struct Temporary {
     fs::path root;
     Temporary() {
-        char pattern[] = "/tmp/cs2-appearance-pack-test-XXXXXX";
-        const auto path = ::mkdtemp(pattern);
+        std::string pattern = (std::filesystem::temp_directory_path() / "cs2-appearance-pack-test-XXXXXX").string();
+        const auto path = ::mkdtemp(pattern.data());
         assert(path); root = path;
     }
     ~Temporary() { std::error_code ignored; fs::remove_all(root, ignored); }

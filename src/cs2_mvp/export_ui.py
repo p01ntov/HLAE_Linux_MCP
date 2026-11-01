@@ -93,6 +93,7 @@ def perform_export(options, *, demo, game_dir, client, stop_session, wait_sessio
     notify = notify or (lambda value: None)
     cancel_event = cancel_event or threading.Event()
     outcome = {"snapshot": None, "stopped": False, "cancelled": False, "plan": None, "error": None}
+    started_at, began = datetime.now(timezone.utc).isoformat(), time.monotonic()
     def cancelled():
         if cancel_event.is_set():
             raise RenderCancelled("Export cancelled")
@@ -114,6 +115,11 @@ def perform_export(options, *, demo, game_dir, client, stop_session, wait_sessio
         if render is None:
             from .discovery import validate_media_tools
             validate_media_tools(export_format=options.export_format)
+        from .export_presets import save_last_used, settings_from_options
+        try:
+            save_last_used(settings_from_options(options))
+        except (OSError, ValueError) as error:
+            outcome["settings_warning"] = str(error)
         cancelled()
         notify({"stage": "closing", "message": "Closing this live session and restoring game configuration"})
         stop_session()
@@ -130,6 +136,17 @@ def perform_export(options, *, demo, game_dir, client, stop_session, wait_sessio
         outcome["cancelled"], outcome["error"] = True, str(error)
     except BaseException as error:
         outcome["error"] = f"{type(error).__name__}: {error}"
+    finally:
+        # Storage runs on the export worker. A history failure cannot change
+        # the result of a completed render or prevent the editor reopening.
+        from .export_presets import append_history, make_history_record
+        try:
+            snapshot = outcome.get("snapshot") or {}
+            record = make_history_record(options, outcome, project_name=snapshot.get("project", {}).get("name", ""),
+                demo=demo, started_at=started_at, elapsed_seconds=time.monotonic()-began)
+            append_history(record)
+        except (OSError, ValueError) as error:
+            outcome["settings_warning"] = str(error)
     return outcome
 
 
@@ -195,6 +212,7 @@ def restore_export_snapshot(client, snapshot):
 
 def create_export_dialog(parent, project, *, start_export):
     from PySide6 import QtCore, QtWidgets
+    from . import export_presets
 
     class ExportDialog(QtWidgets.QDialog):
         def __init__(self):
@@ -205,9 +223,32 @@ def create_export_dialog(parent, project, *, start_export):
             self.busy = False
             self.project = project
             self.cancel_event = threading.Event()
-            form = QtWidgets.QFormLayout(self)
-            form.setContentsMargins(24, 22, 24, 22)
+            self.store = {"version": 1, "last_used": None, "presets": [], "history": []}
+            outer = QtWidgets.QVBoxLayout(self)
+            outer.setContentsMargins(18, 16, 18, 16)
+            scroll = QtWidgets.QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+            settings = QtWidgets.QWidget()
+            form = QtWidgets.QFormLayout(settings)
+            form.setContentsMargins(6, 6, 6, 6)
             form.setSpacing(13)
+            scroll.setWidget(settings)
+            outer.addWidget(scroll, 1)
+            presets_row = QtWidgets.QHBoxLayout()
+            self.preset = QtWidgets.QComboBox()
+            self.preset.setObjectName("export_preset")
+            self.preset.addItem("Custom settings", None)
+            self.save_preset_button = QtWidgets.QPushButton("Save…")
+            self.delete_preset_button = QtWidgets.QPushButton("Delete")
+            presets_row.addWidget(self.preset, 1)
+            presets_row.addWidget(self.save_preset_button)
+            presets_row.addWidget(self.delete_preset_button)
+            form.addRow("Preset", presets_row)
+            self.store_status = QtWidgets.QLabel()
+            self.store_status.setWordWrap(True)
+            self.store_status.setVisible(False)
+            form.addRow(self.store_status)
             self.export_format = QtWidgets.QComboBox()
             self.export_format.addItem("MP4 · H.264 video", "mp4")
             self.export_format.addItem("PNG sequence · lossless RGB · After Effects", "png")
@@ -295,22 +336,36 @@ def create_export_dialog(parent, project, *, start_export):
             info = QtWidgets.QLabel("Your project is saved first. The owned live session closes for capture, then the editor can reopen with the same project and view.")
             info.setWordWrap(True)
             form.addRow(info)
+            history_row = QtWidgets.QHBoxLayout()
+            self.history = QtWidgets.QComboBox()
+            self.history.setObjectName("export_history")
+            self.history.setSizeAdjustPolicy(QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+            self.history.setMinimumContentsLength(24)
+            self.reuse_history_button = QtWidgets.QPushButton("Use settings")
+            history_row.addWidget(self.history, 1)
+            history_row.addWidget(self.reuse_history_button)
+            form.addRow("Recent exports", history_row)
+            self.history_details = QtWidgets.QLabel()
+            self.history_details.setWordWrap(True)
+            self.history_details.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+            form.addRow(self.history_details)
             self.progress = QtWidgets.QProgressBar()
             self.progress.setTextVisible(False)
             self.progress.setRange(0, 1)
             self.progress.setValue(0)
-            form.addRow(self.progress)
+            outer.addWidget(self.progress)
             self.status = QtWidgets.QLabel("Ready")
             self.status.setWordWrap(True)
             self.status.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
-            form.addRow(self.status)
+            outer.addWidget(self.status)
             controls = QtWidgets.QHBoxLayout()
             self.render_button, self.cancel_button = QtWidgets.QPushButton("Export video"), QtWidgets.QPushButton("Close")
             controls.addWidget(self.render_button, 1)
             controls.addWidget(self.cancel_button)
-            form.addRow(controls)
+            outer.addLayout(controls)
             self.inputs = [self.export_format, self.destination, browse, self.scope, self.resolution, self.custom_width, self.custom_height,
-                           self.capture_fps, self.output_fps, self.quality_mode, self.crf, self.bitrate, self.mode, self.audio, self.reopen, self.keep_raw]
+                           self.capture_fps, self.output_fps, self.quality_mode, self.crf, self.bitrate, self.mode, self.audio, self.reopen, self.keep_raw,
+                           self.preset, self.save_preset_button, self.delete_preset_button, self.history, self.reuse_history_button]
             browse.clicked.connect(self.browse)
             self.cancel_button.clicked.connect(self.cancel)
             self.render_button.clicked.connect(self.begin)
@@ -322,8 +377,175 @@ def create_export_dialog(parent, project, *, start_export):
             self.output_fps.valueChanged.connect(self.update_summary)
             for item in (self.custom_width, self.custom_height, self.crf, self.bitrate):
                 item.valueChanged.connect(self.update_summary)
+            self.destination.textChanged.connect(self.update_summary)
             self.export_format.currentIndexChanged.connect(self.select_format)
+            self.preset.activated.connect(self.select_preset)
+            self.save_preset_button.clicked.connect(self.save_named_preset)
+            self.delete_preset_button.clicked.connect(self.delete_named_preset)
+            self.history.currentIndexChanged.connect(self.select_history)
+            self.reuse_history_button.clicked.connect(self.reuse_history)
+            for widget in (self.export_format, self.resolution, self.mode, self.quality_mode):
+                widget.currentIndexChanged.connect(self.mark_custom_settings)
+            for widget in (self.custom_width, self.custom_height, self.capture_fps, self.output_fps, self.crf, self.bitrate):
+                widget.valueChanged.connect(self.mark_custom_settings)
+            for widget in (self.audio, self.reopen, self.keep_raw):
+                widget.toggled.connect(self.mark_custom_settings)
+            for widget in (browse, self.save_preset_button, self.delete_preset_button, self.reuse_history_button, self.cancel_button):
+                widget.setAutoDefault(False)
+            self.render_button.setDefault(True)
+            self.load_store()
+            if self.store["last_used"]:
+                self.apply_settings(self.store["last_used"])
+                if self.export_format.currentData() == "png":
+                    self.destination.setText(str(default.with_suffix("")) + "-frames")
             self.update_summary()
+            available = self.screen().availableGeometry()
+            self.resize(min(660, available.width()), min(860, available.height() - 40))
+
+        def storage_problem(self, error):
+            self.store_status.setText("Export settings could not be saved or loaded: " + str(error))
+            self.store_status.setVisible(True)
+
+        def load_store(self):
+            try:
+                self.store = export_presets.load_export_store()
+                self.store_status.setVisible(False)
+            except (OSError, ValueError) as error:
+                self.storage_problem(error)
+            self.refresh_store_controls()
+
+        def refresh_store_controls(self):
+            selected = self.preset.currentData()
+            self.preset.blockSignals(True)
+            self.preset.clear()
+            self.preset.addItem("Custom settings", None)
+            for item in self.store["presets"]:
+                self.preset.addItem(item["name"], item["name"])
+            self.preset.setCurrentIndex(max(0, self.preset.findData(selected)))
+            self.preset.blockSignals(False)
+            self.history.blockSignals(True)
+            self.history.clear()
+            labels = {"success": "Completed", "failed": "Failed", "cancelled": "Cancelled"}
+            for item in self.store["history"]:
+                timestamp = datetime.fromisoformat(item["finished_at"])
+                try:
+                    stamp = timestamp.astimezone().strftime("%d %b %H:%M %Z")
+                except (OverflowError, OSError, ValueError):
+                    # UTC dates at the supported bounds may overflow when a
+                    # local offset is added. History must not block the dialog
+                    # or the session restart that follows its completion.
+                    stamp = timestamp.strftime("%d %b %H:%M %Z")
+                title = item["project_name"] or Path(item["output"]).name
+                self.history.addItem(f"{labels[item['status']]} · {title} · {stamp}", item)
+            if not self.store["history"]:
+                self.history.addItem("No exports yet", None)
+            self.history.blockSignals(False)
+            self.select_history()
+            self.delete_preset_button.setEnabled(not self.busy and self.preset.currentData() is not None)
+
+        def apply_settings(self, settings):
+            values = export_presets.validate_settings(settings)
+            # A profile changes reusable capture settings only. In/Out and the
+            # chosen destination continue to belong to this export dialog.
+            blocked = [(widget, widget.blockSignals(True)) for widget in self.inputs]
+            try:
+                self.export_format.setCurrentIndex(self.export_format.findData(values["export_format"]))
+                dimensions = (values["width"], values["height"])
+                preset = next((i for i in range(self.resolution.count()) if self.resolution.itemData(i) == dimensions), self.resolution.count()-1)
+                self.resolution.setCurrentIndex(preset)
+                self.custom_width.setValue(values["width"])
+                self.custom_height.setValue(values["height"])
+                self.capture_fps.setValue(values["capture_fps"])
+                self.output_fps.setMaximum(999 if values["export_format"] == "png" else 1000)
+                self.output_fps.setValue(values["fps"])
+                self.mode.setCurrentIndex(self.mode.findData(values["slow_motion"]))
+                self.audio.setChecked(values["audio"])
+                self.reopen.setChecked(values["reopen"])
+                self.keep_raw.setChecked(values["keep_raw"])
+                bitrate = values["video_bitrate_mbps"]
+                self.quality_mode.setCurrentIndex(self.quality_mode.findData("bitrate" if bitrate is not None else "crf"))
+                self.crf.setValue(values["crf"] if values["crf"] is not None else 18)
+                if bitrate is not None:
+                    self.bitrate.setValue(bitrate)
+            finally:
+                for widget, previous in blocked:
+                    widget.blockSignals(previous)
+            self.update_summary()
+
+        def select_preset(self):
+            name = self.preset.currentData()
+            chosen = next((item for item in self.store["presets"] if item["name"] == name), None)
+            if chosen:
+                self.apply_settings(chosen["settings"])
+            self.delete_preset_button.setEnabled(not self.busy and chosen is not None)
+
+        def mark_custom_settings(self):
+            self.preset.setCurrentIndex(0)
+            self.delete_preset_button.setEnabled(False)
+
+        def save_named_preset(self):
+            name, accepted = QtWidgets.QInputDialog.getText(self, "Save export preset", "Preset name", text=self.preset.currentData() or "")
+            if not accepted:
+                return
+            name = name.strip()
+            expected = next((item for item in self.store["presets"] if item["name"].casefold() == name.casefold()), None)
+            if expected is not None:
+                answer = QtWidgets.QMessageBox.question(self, "Replace export preset", f"Replace the settings in “{name}”?")
+                if answer != QtWidgets.QMessageBox.StandardButton.Yes:
+                    return
+            try:
+                self.store = export_presets.save_preset(name, export_presets.settings_from_options(self.options()), expected=expected)
+            except export_presets.PresetConflictError as error:
+                self.load_store()
+                self.storage_problem(error)
+                return
+            except (OSError, ValueError) as error:
+                self.storage_problem(error)
+                return
+            self.store_status.setVisible(False)
+            self.refresh_store_controls()
+            self.preset.setCurrentIndex(self.preset.findData(name))
+            self.delete_preset_button.setEnabled(True)
+
+        def delete_named_preset(self):
+            name = self.preset.currentData()
+            if name is None:
+                return
+            expected = next((item for item in self.store["presets"] if item["name"] == name), None)
+            answer = QtWidgets.QMessageBox.question(self, "Delete export preset", f"Delete “{name}”? Exported files will be kept.")
+            if answer != QtWidgets.QMessageBox.StandardButton.Yes:
+                return
+            try:
+                self.store = export_presets.delete_preset(name, expected=expected)
+            except export_presets.PresetConflictError as error:
+                self.load_store()
+                self.storage_problem(error)
+                return
+            except (OSError, ValueError) as error:
+                self.storage_problem(error)
+                return
+            self.store_status.setVisible(False)
+            self.refresh_store_controls()
+
+        def select_history(self):
+            record = self.history.currentData()
+            self.reuse_history_button.setEnabled(not self.busy and record is not None)
+            if record is None:
+                self.history_details.clear()
+                return
+            text = record["output"]
+            if record.get("error"):
+                text += "\n" + record["error"]
+            elif record["status"] == "success" and not Path(record["output"]).exists():
+                text += "\nThis output is no longer at its saved location."
+            self.history_details.setText(text)
+
+        def reuse_history(self):
+            record = self.history.currentData()
+            if record is not None:
+                self.apply_settings(record["settings"])
+                self.preset.setCurrentIndex(0)
+                self.delete_preset_button.setEnabled(False)
 
         def options(self):
             width, height = self.resolution.currentData() or (self.custom_width.value(), self.custom_height.value())
@@ -387,6 +609,7 @@ def create_export_dialog(parent, project, *, start_export):
             self.render_button.setText("Export lossless frames" if png else "Export video")
             try:
                 info = describe_export(self.project, self.options())
+                validate_export_destination(self.options().output.expanduser().absolute(), self.options().export_format)
                 if png:
                     text = (f"{info['frames']:,} lossless RGB PNG frames · every native sample is kept\n"
                             f"Demo {info['source_duration']:.3f}s → {info['output_duration']:.3f}s when interpreted at {self.output_fps.value()} FPS in AE\n"
@@ -421,6 +644,8 @@ def create_export_dialog(parent, project, *, start_export):
                 self.update_summary()
 
         def begin(self):
+            if self.busy:
+                return
             self.busy = True
             self.cancel_event.clear()
             for widget in self.inputs:
@@ -441,18 +666,24 @@ def create_export_dialog(parent, project, *, start_export):
 
         def complete(self, outcome):
             self.busy = False
+            plan = outcome.get("plan") or {}
+            success = bool(plan.get("status") == "done" and not plan.get("error")
+                and not outcome.get("error") and not outcome.get("cancelled"))
             self.progress.setRange(0, 1)
-            self.progress.setValue(1 if outcome.get("plan") else 0)
+            self.progress.setValue(1 if success else 0)
             self.cancel_button.setText("Close")
             self.cancel_button.setEnabled(True)
             for widget in self.inputs:
                 widget.setEnabled(True)
+            self.load_store()
+            if outcome.get("settings_warning"):
+                self.storage_problem(outcome["settings_warning"])
             self.update_summary()
-            if outcome.get("plan"):
+            if success:
                 self.status.setText("Export complete\n" + str(outcome["plan"]["output"]))
             else:
                 suffix = "\nProject saved: " + outcome["snapshot"]["path"] if outcome.get("snapshot") else ""
-                self.status.setText((outcome.get("error") or "Export stopped") + suffix)
+                self.status.setText((outcome.get("error") or plan.get("error") or "Export stopped") + suffix)
 
         def cancel(self):
             if self.busy:
@@ -461,6 +692,14 @@ def create_export_dialog(parent, project, *, start_export):
                 self.cancel_button.setEnabled(False)
             else:
                 self.close()
+
+        def reject(self):
+            # Escape routes straight to QDialog.reject(), bypassing closeEvent.
+            # Keep the active job visible until its cancellation is confirmed.
+            if self.busy:
+                self.cancel()
+            else:
+                super().reject()
 
         def closeEvent(self, event):
             if self.busy:

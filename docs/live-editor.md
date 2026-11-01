@@ -1,3 +1,27 @@
+## 0.1.14 workflow update
+
+Export profiles retain reusable format, resolution, capture/output FPS and
+encoding settings. Use a named profile or the last settings; recent exports
+can fill the form through **Use settings** without starting a render. Output
+location and the current composition/region belong to the current job and are
+preserved. Profiles/history use `cs2-camera/exports.json` under XDG_CONFIG_HOME,
+or an absolute `CS2_CAMERA_EXPORT_PRESETS` override. Invalid/newer files are
+reported and retained. Escape requests cancellation while keeping job progress
+accessible, and unsuccessful jobs remain labelled Failed/Cancelled.
+
+In Camera Timeline, Ctrl-click toggles linked-key selection; dragging on empty
+visible lanes selects a box. Dragging selected keys keeps their relative timing
+and respects unselected neighbours and composition bounds. The release emits
+one guarded project edit and one undo entry. Escape, a conflicting revision or
+a changed document cancels the draft. Shift remains the no-snap modifier.
+Fit selection and previous/next key navigation do not alter saved keys.
+
+Ctrl+O now supports title/ID/demo-filename search, a **Compatible only** filter
+and Recent/Name sorting. Compatibility still includes legacy projects without
+recording metadata; their existing warning remains visible. Hidden or removed
+selection cannot be loaded. Search folds Latin/Cyrillic case, including Ё;
+other scripts match literally.
+
 # CS2 Camera Studio — Linux live prototype
 
 Native Linux CS2 runs once with `-insecure`. A private client-side module owns

@@ -1,5 +1,6 @@
 #include "../demo_refresh.h"
 #include <cassert>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <limits>
@@ -16,8 +17,8 @@ struct Fixture {
     Refresh refresh;
     Refresh::TimePoint now{};
     Fixture() {
-        char pattern[] = "/tmp/cs2-demo-refresh-test-XXXXXX";
-        const auto* created = ::mkdtemp(pattern); assert(created);
+        std::string pattern = (std::filesystem::temp_directory_path() / "cs2-demo-refresh-test-XXXXXX").string();
+        const auto* created = ::mkdtemp(pattern.data()); assert(created);
         directory = created; path = directory + "/private demo.dem";
         std::ofstream(path) << "fake demo bytes";
     }

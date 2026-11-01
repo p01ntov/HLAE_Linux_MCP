@@ -4,11 +4,13 @@
 #include <imgui_internal.h>
 #include <functional>
 #include <string>
+#include <unordered_set>
 
 namespace cs2_live_ui {
 namespace timeline_time {
 using Json=nlohmann::json;
 constexpr double KeyEpsilon=0.000001;
+using Selection=std::unordered_set<std::string>;
 inline double Rate(const std::string& unit,double tick_rate,double frame_rate){
   return unit=="ticks"?tick_rate:unit=="frames"?frame_rate:1.;
 }
@@ -25,6 +27,49 @@ inline std::pair<double,double> KeyTimeBounds(const cs2_live::Project& project,s
   low=std::min(low,keys[index].time);high=std::max(high,keys[index].time);
   if(low>high)return {keys[index].time,keys[index].time};
   return {low,high};
+}
+// A group keeps one offset. Only its neighbours outside the selection constrain
+// that offset, including neighbours between two separately selected blocks.
+inline std::pair<double,double> GroupDeltaBounds(const cs2_live::Project& project,const Selection& selected){
+  double low=-project.duration,high=project.duration;bool found=false;
+  for(std::size_t i=0;i<project.keys.size();++i){
+    const auto& key=project.keys[i];if(!selected.count(key.id))continue;found=true;
+    low=std::max(low,-key.time);high=std::min(high,project.duration-key.time);
+    if(i&&!selected.count(project.keys[i-1].id))low=std::max(low,KeyTimeBounds(project,i).first-key.time);
+    if(i+1<project.keys.size()&&!selected.count(project.keys[i+1].id))high=std::min(high,KeyTimeBounds(project,i).second-key.time);
+  }
+  return found?std::make_pair(std::min(low,0.),std::max(high,0.)):std::make_pair(0.,0.);
+}
+inline bool GroupShiftFits(const cs2_live::Project& project,const Selection& selected,double delta){
+  if(!std::isfinite(delta))return false;
+  double previous=0;bool first=true;
+  for(const auto& key:project.keys){
+    const double time=key.time+(selected.count(key.id)?delta:0.);
+    if(time<0||time>project.duration||(!first&&time-previous<KeyEpsilon))return false;
+    previous=time;first=false;
+  }
+  return true;
+}
+inline double GroupDelta(const cs2_live::Project& project,const Selection& selected,double requested){
+  const auto bounds=GroupDeltaBounds(project,selected);
+  double delta=std::clamp(requested,bounds.first,bounds.second);
+  // Subtracting a boundary and then adding the offset round separately. Move
+  // inward by representable offsets; never squeeze individual key intervals.
+  for(int attempt=0;attempt<16;++attempt){
+    if(GroupShiftFits(project,selected,delta))return delta;
+    delta=std::nextafter(delta,0.);
+  }
+  // Extremely tight keys can have no representable translated spacing at the
+  // requested magnitude. The unchanged valid group remains a safe no-op.
+  return 0;
+}
+inline Json RetimeProject(const Json& raw,const Selection& selected,double delta){
+  const auto project=cs2_live::ReadProject(raw);const auto bounds=GroupDeltaBounds(project,selected);
+  if(delta<bounds.first||delta>bounds.second||!GroupShiftFits(project,selected,delta))throw std::invalid_argument("group timing would cross a key or composition boundary");
+  Json keys=raw.value("keys",Json::array());std::size_t found=0;
+  for(auto& key:keys)if(selected.count(key.value("id",std::string()))){key["time"]=key.at("time").get<double>()+delta;++found;}
+  if(found!=selected.size())throw std::invalid_argument("selected camera key no longer exists");
+  Json candidate=raw;candidate["keys"]=keys;cs2_live::ReadProject(candidate);return {{"keys",std::move(keys)}};
 }
 inline double ScaledTime(double time,double before,double after){return time==before?after:std::clamp(time*(after/before),0.,after);}
 inline bool ScaleFits(const cs2_live::Project& project,double duration){
@@ -113,11 +158,26 @@ class CameraTimelineUi {
       if(backdrop)backdrop();
       ImGui::SetWindowFontScale(18*scale/ImGui::GetFont()->FontSize);
     }
-    const Json raw=state.value("project",Json::object());cs2_live::Project project;
-    try{project=cs2_live::ReadProject(raw);}catch(const std::exception&){ImGui::TextUnformatted("No valid camera composition");if(!embedded)ImGui::End();return;}
+    const Json empty=Json::object();const Json& incoming=state.contains("project")?state.at("project"):empty;
+    // Validation sorts keys and rebuilds curve data. Reuse that result while
+    // only telemetry/cursor changes; keep a snapshot so callbacks cannot change
+    // the document under the rest of this frame.
+    if(!project_cached_||incoming!=project_source_){
+      project_source_=incoming;project_cached_=true;project_valid_=false;valid_ids_.clear();
+      try{project_cache_=cs2_live::ReadProject(project_source_);project_valid_=true;for(const auto& key:project_cache_.keys)valid_ids_.insert(key.id);}catch(const std::exception&){}
+    }
+    if(!project_valid_){ResetGesture();ImGui::TextUnformatted("No valid camera composition");if(!embedded)ImGui::End();return;}
+    const auto& raw=project_source_;const auto& project=project_cache_;
     const auto document=state.value("project_document_id",std::uint64_t(0));
-    if(document!=document_){ResetGesture();document_=document;fitted_=false;}
-    if(drag_.kind!=None&&raw!=drag_.source)ResetGesture();
+    const auto revision=state.value("revision",std::uint64_t(0));
+    if(document!=document_){ResetGesture();document_=document;fitted_=false;selection_.clear();primary_seen_.clear();}
+    if(drag_.kind!=None&&(raw!=drag_.source||revision!=drag_.revision))ResetGesture();
+    for(auto it=selection_.begin();it!=selection_.end();)if(!valid_ids_.count(*it))it=selection_.erase(it);else ++it;
+    auto primary=[&](const std::string& id){primary_seen_=id;if(select)select(id);};
+    if(!primary_seen_.empty()&&!valid_ids_.count(primary_seen_)&&(selected.empty()||selected==primary_seen_)){
+      ResetGesture();std::string remaining;for(const auto& key:project.keys)if(selection_.count(key.id)){remaining=key.id;break;}primary(remaining);
+    }else if(selected!=primary_seen_){ResetGesture();selection_.clear();if(valid_ids_.count(selected))selection_.insert(selected);primary_seen_=selected;}
+    auto single=[&](const std::string& id){selection_.clear();if(valid_ids_.count(id))selection_.insert(id);primary(id);};
     const auto unit=prefs.value("time_unit",std::string("seconds")),snap=prefs.value("snap_mode",std::string("tick")),resize=prefs.value("resize_mode",std::string("keep"));
     const double tick_rate=std::max(1,state.value("tick_rate",64)),fps=std::clamp(prefs.value("frame_rate",60),1,1000);
     const bool labels=prefs.value("show_key_labels",true),tips=prefs.value("show_tooltips",true);
@@ -131,6 +191,10 @@ class CameraTimelineUi {
     auto combo=[&](const char* label,const char* field,const std::string& current,const std::vector<std::string>& values,float width){
       ImGui::SetNextItemWidth(width*scale);if(ImGui::BeginCombo(label,current.c_str())){if(backdrop)backdrop();for(const auto& value:values)if(ImGui::Selectable(value.c_str(),current==value))preference(field,value);ImGui::EndCombo();}
     };
+    auto next_control=[&](float width){
+      if(ImGui::GetCurrentWindow()->WorkRect.Max.x-ImGui::GetItemRectMax().x>=width*scale+ImGui::GetStyle().ItemSpacing.x)ImGui::SameLine();
+    };
+    auto seek_key=[&](const cs2_live::Key& key){single(key.id);ResetGesture();if(send&&std::abs(key.time-state.value("cursor",0.))>1e-10)send("scrub",{{"time",key.time},{"seek_demo",state.value("sync_demo",false)}});};
     // Shared-workspace setup lives in Settings. Standalone tools keep their
     // original setup controls for diagnostics and independent use.
     if(!embedded){
@@ -143,18 +207,27 @@ class CameraTimelineUi {
     ImGui::TextDisabled("Snap");ImGui::SameLine();combo("##composition_snap","snap_mode",snap,{"tick","frame","off"},80);
     ImGui::SameLine();if(ImGui::Button("Fit composition"))fitted_=false;
     if(tips&&ImGui::IsItemHovered())tooltip("Wheel: zoom at pointer. Middle drag: pan. Shift bypasses tick/frame snapping.");
+    next_control(110);ImGui::BeginDisabled(selection_.empty());
+    if(ImGui::Button("Fit selection")){
+      double low=project.duration,high=0;for(const auto& key:project.keys)if(selection_.count(key.id)){low=std::min(low,key.time);high=std::max(high,key.time);}
+      view_span_=std::max({.012,high-low,(high==low?project.duration*.1:0.)})*1.3;
+      view_start_=std::max(0.,(low+high-view_span_)*.5);fitted_=true;
+    }ImGui::EndDisabled();
+    const cs2_live::Key* previous=nullptr;const cs2_live::Key* next=nullptr;const double current_time=state.value("cursor",0.);
+    for(const auto& key:project.keys){if(key.time<current_time-1e-10)previous=&key;else if(key.time>current_time+1e-10&&!next)next=&key;}
+    next_control(100);ImGui::BeginDisabled(!previous);if(ImGui::Button("Previous key")&&previous)seek_key(*previous);ImGui::EndDisabled();
+    next_control(80);ImGui::BeginDisabled(!next);if(ImGui::Button("Next key")&&next)seek_key(*next);ImGui::EndDisabled();
     int height=std::clamp(prefs.value("timeline_height",240),160,420);
     if(!embedded){
-      ImGui::SameLine();ImGui::SetNextItemWidth(100*scale);
+      next_control(160);ImGui::SetNextItemWidth(100*scale);
       const bool height_changed=ImGui::SliderInt("Height##composition_height",&height,160,420);
       // Slider values are previews until release; preserve the local active value.
       if(ImGui::IsItemActive()||height_changed){height_draft_=height;height_active_=true;}else if(height_active_){if(height_draft_!=prefs.value("timeline_height",240))preference("timeline_height",height_draft_);height_active_=false;}
     }
-    auto next_control=[&](float width){
-      if(!embedded||ImGui::GetCurrentWindow()->WorkRect.Max.x-ImGui::GetItemRectMax().x>=width*scale+ImGui::GetStyle().ItemSpacing.x)ImGui::SameLine();
-    };
     const char* lane_fields[]={"timeline_position","timeline_rotation","timeline_fov"};const char* lane_names[]={"Position","Rotation","FOV"};
     bool lanes[3];for(int i=0;i<3;++i){lanes[i]=prefs.value(lane_fields[i],true);if(i)ImGui::SameLine();if(ImGui::Checkbox(lane_names[i],&lanes[i]))preference(lane_fields[i],lanes[i]);}
+    const int lane_mask=int(lanes[0])|(int(lanes[1])<<1)|(int(lanes[2])<<2);
+    if(drag_.kind!=None&&drag_.lane_mask!=lane_mask)ResetGesture();
     next_control(80);combo("##composition_resize","resize_mode",resize,{"keep","scale"},80);
     if(!duration_active_){duration_unit_=unit;duration_resize_=resize;duration_tick_rate_=tick_rate;duration_fps_=fps;duration_draft_=timeline_time::SecondsToDisplay(project.duration,duration_unit_,duration_tick_rate_,duration_fps_);}
     next_control(120+ImGui::CalcTextSize("Duration").x/scale+ImGui::GetStyle().ItemInnerSpacing.x/scale);
@@ -198,8 +271,8 @@ class CameraTimelineUi {
     };
     int row=0;for(int lane=0;lane<3;++lane){if(!lanes[lane])continue;const float y=origin.y+ruler+lane_height*(row+.5f);++row;
       draw->AddLine(ImVec2(float(left),y),ImVec2(float(left+width),y),IM_COL32(125,125,125,55));
-      for(std::size_t i=0;i<project.keys.size();++i){const auto& key=project.keys[i];double time=drag_.kind==Key&&drag_.id==key.id?drag_.time:key.time;if(drag_.kind==End&&drag_.resize=="scale")time*=end/project.duration;const float x=x_at(time);if(x<left-10*scale||x>left+width+10*scale)continue;
-        const bool chosen=key.id==selected;const auto color=chosen?IM_COL32(255,220,135,255):IM_COL32(220,220,220,255);const float r=(chosen?6.f:4.f)*scale;
+      for(std::size_t i=0;i<project.keys.size();++i){const auto& key=project.keys[i];double time=key.time+(drag_.kind==Key&&drag_.ids.count(key.id)?drag_.delta:0.);if(drag_.kind==End&&drag_.resize=="scale")time*=end/project.duration;const float x=x_at(time);if(x<left-10*scale||x>left+width+10*scale)continue;
+        const bool chosen=(drag_.kind==Marquee&&drag_.moved?drag_.preview:selection_).count(key.id);const auto color=chosen?IM_COL32(255,220,135,255):IM_COL32(220,220,220,255);const float r=(chosen?6.f:4.f)*scale;
         draw->AddQuadFilled(ImVec2(x,y-r),ImVec2(x+r,y),ImVec2(x,y+r),ImVec2(x-r,y),color);
         hitpoint(std::string("##composition_key_")+lane_names[lane]+"_"+key.id,x,y,Key,key.id,i);
         if(labels&&(chosen||project.keys.size()<24)){char label[32];std::snprintf(label,sizeof(label),"%02zu",i+1);draw->AddText(ImVec2(x+8*scale,y-7*scale),color,label);}
@@ -213,39 +286,73 @@ class CameraTimelineUi {
     // A visible marker may straddle the ruler edge. ImGui floors MousePos to
     // pixels, so a fractional-scale In=0 center can land just left of `left`.
     if(hover&&(mouse.x>=left||(hit_kind!=None&&mouse.x>=std::floor(left)))&&ImGui::IsMouseClicked(ImGuiMouseButton_Left)){
-      drag_.kind=hit_kind==None?Scrub:hit_kind;drag_.id=hit;drag_.index=hit_index;drag_.source=raw;drag_.mouse=mouse;drag_.original=drag_.time=drag_.kind==Key?project.keys[hit_index].time:drag_.kind==In?stored.in:drag_.kind==Out?stored.out:drag_.kind==End?project.duration:std::clamp(time_at(mouse.x),0.,project.duration);drag_.snap=snap;drag_.resize=resize;drag_.tick_rate=tick_rate;drag_.frame_rate=fps;
-      if(drag_.kind==Key&&select)select(hit);
+      drag_={};drag_.kind=hit_kind==None?(count&&mouse.y>=origin.y+ruler&&mouse.y<origin.y+size.y-footer?Marquee:Scrub):hit_kind;
+      drag_.id=hit;drag_.source=raw;drag_.revision=revision;drag_.lane_mask=lane_mask;drag_.mouse=mouse;drag_.original=drag_.time=drag_.kind==Key?project.keys[hit_index].time:drag_.kind==In?stored.in:drag_.kind==Out?stored.out:drag_.kind==End?project.duration:std::clamp(time_at(mouse.x),0.,project.duration);drag_.snap=snap;drag_.resize=resize;drag_.tick_rate=tick_rate;drag_.frame_rate=fps;
+      drag_.additive=ImGui::GetIO().KeyCtrl;drag_.ids=selection_;
+      if(drag_.kind==Key){
+        if(drag_.additive){
+          if(selection_.erase(hit)){
+            // Removing a member is a selection click, never a drag of the
+            // remaining group under a key that is no longer selected.
+            std::string remaining;for(const auto& key:project.keys)if(selection_.count(key.id)){remaining=key.id;break;}
+            primary(remaining);drag_={};
+          }else{selection_.insert(hit);primary(hit);}
+        }else if(!selection_.count(hit))single(hit);else primary(hit);
+        if(drag_.kind==Key){drag_.ids=selection_;drag_.double_click=!drag_.additive&&ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left);}
+      }
     }
     if(drag_.kind!=None){
       if(ImGui::IsKeyPressed(ImGuiKey_Escape,false)){ResetGesture();ImGui::ClearActiveID();}
-      else if(ImGui::IsMouseDown(ImGuiMouseButton_Left)){
-        const double dx=mouse.x-drag_.mouse.x;drag_.moved=std::abs(dx)>3*scale;
-        if(!drag_.moved&&drag_.kind!=Scrub)drag_.time=drag_.original;
-        if(drag_.moved||drag_.kind==Scrub){double time=drag_.kind==Scrub?time_at(mouse.x):drag_.original+dx/width*view_span_;time=timeline_time::Snap(time,drag_.snap,drag_.tick_rate,drag_.frame_rate,ImGui::GetIO().KeyShift);
-          if(drag_.kind==Key){const auto bounds=timeline_time::KeyTimeBounds(project,drag_.index);time=std::clamp(time,bounds.first,bounds.second);}
-          else if(drag_.kind==End)time=std::clamp(time,timeline_time::MinimumDuration(raw,drag_.resize),86400.);
+      else{
+        const double dx=mouse.x-drag_.mouse.x,dy=mouse.y-drag_.mouse.y;
+        drag_.moved=drag_.moved||(drag_.kind==Marquee?std::hypot(dx,dy):std::abs(dx))>3*scale;
+        if(drag_.kind==Marquee){
+          drag_.preview=drag_.additive?drag_.ids:timeline_time::Selection{};
+          if(drag_.moved){
+            const ImRect box(ImVec2(std::max(float(left),std::min(drag_.mouse.x,mouse.x)),std::max(origin.y+ruler,std::min(drag_.mouse.y,mouse.y))),
+              ImVec2(std::min(float(left+width),std::max(drag_.mouse.x,mouse.x)),std::min(origin.y+size.y-footer,std::max(drag_.mouse.y,mouse.y))));
+            for(const auto& key:project.keys){const float x=x_at(key.time);for(int lane=0;lane<count;++lane){const float y=origin.y+ruler+lane_height*(lane+.5f);
+                if(x>=box.Min.x&&x<=box.Max.x&&y>=box.Min.y&&y<=box.Max.y){drag_.preview.insert(key.id);break;}}}
+            draw->AddRectFilled(box.Min,box.Max,IM_COL32(120,205,225,28));draw->AddRect(box.Min,box.Max,IM_COL32(120,205,225,180));
+          }
+        }else if(drag_.kind!=Scrub&&std::abs(dx)<=3*scale){drag_.time=drag_.original;drag_.delta=0.;}
+        else if(drag_.moved||drag_.kind==Scrub){double time=drag_.kind==Scrub?time_at(mouse.x):drag_.original+dx/width*view_span_;time=timeline_time::Snap(time,drag_.snap,drag_.tick_rate,drag_.frame_rate,ImGui::GetIO().KeyShift);
+          if(drag_.kind==Key){drag_.delta=timeline_time::GroupDelta(project,drag_.ids,time-drag_.original);time=drag_.original+drag_.delta;}
+          else if(drag_.kind==End)time=std::clamp(time,timeline_time::MinimumDuration(project,drag_.resize),86400.);
           else if(drag_.kind==In)time=std::clamp(time,0.,std::max(0.,stored.out-1e-6));
           else if(drag_.kind==Out)time=std::clamp(time,std::min(project.duration,stored.in+1e-6),project.duration);
           else time=std::clamp(time,0.,project.duration);
           drag_.time=time;
         }
-      }else{
-        if(send&&((drag_.moved&&std::abs(drag_.time-drag_.original)>1e-10)||drag_.kind==Scrub)){
-          if(drag_.kind==Key)send("update_key",{{"id",drag_.id},{"time",drag_.time}});
-          else if(drag_.kind==In||drag_.kind==Out)send("set_project",{{"render_range",{{drag_.kind==In?"in":"out",drag_.time}}}});
-          else if(drag_.kind==End){try{send("set_project",timeline_time::ResizeProject(drag_.source,drag_.time,drag_.resize));error_.clear();}catch(const std::exception& e){error_=e.what();}}
-          else if(std::abs(drag_.time-state.value("cursor",0.))>1e-10)send("scrub",{{"time",drag_.time},{"seek_demo",state.value("sync_demo",false)}});
-        }ResetGesture();
+        // Mouse movement and release may arrive in the same frame. Resolve the
+        // final pointer before committing, including a drag shorter than 1 frame.
+        if(!ImGui::IsMouseDown(ImGuiMouseButton_Left)){
+          if(drag_.kind==Marquee){
+            selection_=drag_.moved?drag_.preview:(drag_.additive?drag_.ids:timeline_time::Selection{});
+            std::string chosen;if(selection_.count(primary_seen_))chosen=primary_seen_;else for(const auto& key:project.keys)if(selection_.count(key.id)){chosen=key.id;break;}
+            primary(chosen);
+          }else if(drag_.kind==Key&&!drag_.moved&&drag_.double_click){
+            for(const auto& key:project.keys)if(key.id==drag_.id){seek_key(key);break;}
+          }else if(send&&((drag_.moved&&std::abs(drag_.time-drag_.original)>1e-10)||drag_.kind==Scrub)){
+            if(drag_.kind==Key){try{const auto patch=timeline_time::RetimeProject(drag_.source,drag_.ids,drag_.delta);if(timeline_time::Changed(raw,patch))send("set_project",patch);error_.clear();}catch(const std::exception& e){error_=e.what();}}
+            else if(drag_.kind==In||drag_.kind==Out)send("set_project",{{"render_range",{{drag_.kind==In?"in":"out",drag_.time}}}});
+            else if(drag_.kind==End){try{send("set_project",timeline_time::ResizeProject(drag_.source,drag_.time,drag_.resize));error_.clear();}catch(const std::exception& e){error_=e.what();}}
+            else if(std::abs(drag_.time-state.value("cursor",0.))>1e-10)send("scrub",{{"time",drag_.time},{"seek_demo",state.value("sync_demo",false)}});
+          }
+          ResetGesture();
+        }
       }
     }
-    if(tips&&hover&&hit_kind!=None&&drag_.kind==None){char text[512];std::snprintf(text,sizeof(text),"%s | %s | Shift: no snap",hit_kind==Key?hit.c_str():hit_kind==End?"Composition end":hit_kind==In?"Region In":"Region Out",hit_kind==Key?"All three channels move together":hit_kind==End?"Keep protects key times; Scale retimes all keys":"Temporal render bound");tooltip(text);}
-    draw->PopClipRect();ImGui::TextDisabled("Shared key times | Wheel zoom | MMB pan | Shift no snap | Esc cancel");
+    if(tips&&hover&&hit_kind!=None&&drag_.kind==None){char text[512];std::snprintf(text,sizeof(text),"%s | %s | Shift: no snap",hit_kind==Key?hit.c_str():hit_kind==End?"Composition end":hit_kind==In?"Region In":"Region Out",hit_kind==Key?"Ctrl: toggle selection. Double click: go to key. Channels stay linked.":hit_kind==End?"Keep protects key times; Scale retimes all keys":"Temporal render bound");tooltip(text);}
+    draw->PopClipRect();ImGui::TextDisabled("%zu selected | Ctrl click | Drag empty lane: select | Shift no snap | Esc cancel",selection_.size());
     if(!embedded)ImGui::End();
     if(!visible)ResetGesture();
   }
  private:
-  enum Kind{None,Key,Scrub,In,Out,End};
-  struct Drag{int kind=None;std::string id,snap,resize;std::size_t index=0;Json source;ImVec2 mouse{};double original=0,time=0,tick_rate=64,frame_rate=60;bool moved=false;}drag_;
+  enum Kind{None,Key,Scrub,In,Out,End,Marquee};
+  struct Drag{int kind=None,lane_mask=0;std::string id,snap,resize;Json source;ImVec2 mouse{};double original=0,time=0,delta=0,tick_rate=64,frame_rate=60;std::uint64_t revision=0;bool moved=false,additive=false,double_click=false;timeline_time::Selection ids,preview;}drag_;
+  timeline_time::Selection selection_,valid_ids_;std::string primary_seen_;
+  Json project_source_;cs2_live::Project project_cache_;bool project_cached_=false,project_valid_=false;
   std::uint64_t document_=std::numeric_limits<std::uint64_t>::max();bool fitted_=false,duration_active_=false,height_active_=false,fps_active_=false;
   double view_start_=0,view_span_=1,duration_draft_=0,fps_draft_=60,duration_tick_rate_=64,duration_fps_=60;int height_draft_=240,height_seen_=-1;float scale_seen_=0;std::string error_,duration_unit_="seconds",duration_resize_="keep";
 };

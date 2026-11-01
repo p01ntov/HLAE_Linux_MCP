@@ -59,8 +59,48 @@ def require_native(path: Path):
         raise RuntimeError(f"Build the ELF64 native library first: {path}")
 
 
+def copy_vendored_licenses(target: Path):
+    """Keep release-pinned notices even when upstream wheels omit license files."""
+    root = ROOT / "packaging/licenses"
+    manifest = json.loads((root / "provenance.json").read_text())
+    if manifest.get("format") != 1:
+        raise RuntimeError("Unsupported vendored license provenance format")
+    for source in manifest["sources"]:
+        for name, expected in source["distribution_versions"].items():
+            actual = importlib.metadata.version(name)
+            if actual != expected:
+                raise RuntimeError(f"Refresh pinned license sources for {name}: expected {expected}, found {actual}")
+    verified = []
+    for item in manifest["files"]:
+        relative = Path(item["path"])
+        if relative.is_absolute() or ".." in relative.parts:
+            raise RuntimeError("Invalid vendored license path")
+        source = root / relative
+        if not source.is_file() or sha256(source) != item["sha256"]:
+            raise RuntimeError(f"Pinned license checksum mismatch: {relative}")
+        verified.append((source, target / "upstream" / relative))
+    for source, destination in verified:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+    for name in ("NOTICE.md", "provenance.json"):
+        shutil.copy2(root / name, target / name)
+    distributions = []
+    for name in ("PySide6-Essentials", "shiboken6", "demoparser2", "PyInstaller"):
+        distribution = importlib.metadata.distribution(name)
+        distributions.append({"name": name, "version": distribution.version,
+                              "license": distribution.metadata.get("License"),
+                              "license_expression": distribution.metadata.get("License-Expression"),
+                              "project_urls": distribution.metadata.get_all("Project-URL", [])})
+    (target / "bundled-distributions.json").write_text(json.dumps({
+        "python": platform.python_version(), "platform": platform.platform(),
+        "distributions": distributions,
+        "qt_linking": "Shared libraries in usr/bin/_internal/PySide6/Qt/lib; see NOTICE.md",
+    }, indent=2) + "\n")
+
+
 def copy_licenses(target: Path):
     target.mkdir(parents=True, exist_ok=True)
+    copy_vendored_licenses(target)
     for name in ("PySide6-Essentials", "shiboken6", "PyInstaller", "demoparser2", "numpy", "pandas", "polars", "polars-runtime-32", "pyarrow", "tqdm"):
         try:
             distribution = importlib.metadata.distribution(name)
@@ -168,6 +208,7 @@ def build(plugin: Path, overlay: Path, output: Path, *, appdir_only=False) -> Pa
     shutil.copy2(ROOT / "AGENTS.md", share)
     shutil.copy2(ROOT / "docs/map-geometry.md", share)
     shutil.copy2(ROOT / "docs/cinematic-effects-research.md", share)
+    shutil.copy2(ROOT / "docs/review-0.1.14.md", share)
     (share / "docs").mkdir()
     for document in ("mcp-agent-guide.md", "high-fps-capture.md", "map-geometry.md", "cinematic-effects-research.md"):
         shutil.copy2(ROOT / "docs" / document, share / "docs" / document)
@@ -181,7 +222,7 @@ def build(plugin: Path, overlay: Path, output: Path, *, appdir_only=False) -> Pa
     environment = dict(os.environ, ARCH="x86_64", APPIMAGE_EXTRACT_AND_RUN="1")
     run([appimagetool, "--no-appstream", appdir, output.resolve()], env=environment)
     output.chmod(0o755)
-    metadata = {"version": "0.1.13", "appimage": str(output.resolve()), "sha256": sha256(output),
+    metadata = {"version": "0.1.14", "appimage": str(output.resolve()), "sha256": sha256(output),
                 "plugin_sha256": sha256(plugin), "overlay_sha256": sha256(overlay),
                 "capture_plugin_sha256": sha256(capture_assets / "libcamera_capture.so"),
                 "stock_plugin_sha256": sha256(capture_assets / "libserver_stock.so"),

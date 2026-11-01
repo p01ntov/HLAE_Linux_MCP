@@ -41,13 +41,16 @@ def session(demo, **kwargs):
 
 def render(*args, **kwargs):
     calls.append("render")
+    if os.environ.get("CS2_CAMERA_PROBE_FAILED_PLAN") == "1":
+        return {"status":"failed", "error":"Simulated failed capture", "output":str(kwargs["output"])}
     Path(kwargs["output"]).write_bytes(b"mocked backend output")
-    return {"output":str(kwargs["output"])}
+    return {"status":"done","output":str(kwargs["output"])}
 
 
 real_exec = QtWidgets.QApplication.exec
 with tempfile.TemporaryDirectory() as temporary:
     os.environ["XDG_STATE_HOME"] = temporary
+    os.environ["CS2_CAMERA_EXPORT_PRESETS"] = str(Path(temporary)/"exports.json")
     def loop(app):
         window = next(w for w in app.topLevelWidgets() if isinstance(w, QtWidgets.QMainWindow))
         began = time.monotonic()
@@ -69,6 +72,10 @@ with tempfile.TemporaryDirectory() as temporary:
                 phase["exported"] = True
             if len(sessions) >= 2 and "import_project" in calls and not phase["closing"]:
                 phase["closing"] = True
+                if os.environ.get("CS2_CAMERA_PROBE_FAILED_PLAN") == "1":
+                    logs = "\n".join(widget.toPlainText() for widget in window.findChildren(QtWidgets.QPlainTextEdit))
+                    if "Export complete" in logs or "Simulated failed capture" not in logs:
+                        failures.append("failed plan was reported as completed")
                 for dialog in dialogs:
                     dialog.close()
                 window.close()

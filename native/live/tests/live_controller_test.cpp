@@ -4,6 +4,11 @@
 
 using namespace cs2_live;
 
+static std::string TestPattern(const char* name) {
+    const char* artifacts=std::getenv("CS2_CAMERA_TEST_ARTIFACTS");
+    return ((artifacts&&*artifacts?std::filesystem::path(artifacts):std::filesystem::temp_directory_path())/name).string();
+}
+
 static Json State(Controller& controller) { return Json::parse(controller.StateJson()); }
 static void Command(Controller& controller,const std::string& method,Json params=Json::object(),bool demo=true) {
     Json request={{"method",method},{"params",params}};
@@ -153,6 +158,24 @@ static void TestValueCurves() {
     Command(controller,"update_key",{{"id","0"},{"position_out",{0,0,1000001}}});assert(State(controller)["project"]==beforeInvalid);
 }
 
+static void TestLargeProjectIdentityValidation() {
+    Project project;project.duration=4096;
+    for(int index=0;index<4096;++index) {
+        Key key;key.id="key-"+std::to_string(index);key.time=index;project.keys.push_back(key);
+    }
+    Normalize(project);assert(project.keys.size()==4096);
+    project.keys.back().id=project.keys.front().id;
+    bool duplicate=false;
+    try{Normalize(project);}catch(const std::invalid_argument& error){duplicate=std::string(error.what())=="duplicate key id";}
+    assert(duplicate);
+    project.keys.resize(3000);std::string prefix;
+    for(int n=0;n<30;++n)prefix+="🐈";
+    for(std::size_t index=0;index<project.keys.size();++index)project.keys[index].id=prefix+std::to_string(index);
+    Normalize(project);const auto portable=ToJson(project);
+    assert(portable.dump().size()<MaxLine-16384);
+    assert(ReadProject(portable).keys.back().id==prefix+"2999");
+}
+
 static void TestEditorPreferences() {
     const auto defaults=EditorPreferenceDefaults();assert(defaults["frame_rate"]==60 && defaults["timeline_height"]==240);
     assert(defaults["workspace_source"]=="camera" && defaults["workspace_tool"]=="timeline" && defaults["workspace_open"]==true);
@@ -165,7 +188,7 @@ static void TestEditorPreferences() {
         bool rejected=false;try{ValidateEditorPreferences(patch);}catch(const std::exception&){rejected=true;}assert(rejected);
     }
     const char* base=std::getenv("CS2_PREF_TEST_ROOT");
-    const std::string pattern=std::string(base?base:"/tmp")+"/cs2-editor-prefs-XXXXXX";
+    const std::string pattern=base?std::string(base)+"/cs2-editor-prefs-XXXXXX":TestPattern("cs2-editor-prefs-XXXXXX");
     std::vector<char> writable(pattern.begin(),pattern.end());writable.push_back(0);char* folder=mkdtemp(writable.data());assert(folder);
     const std::string path=std::string(folder)+"/editor.json",socket=std::string(folder)+"/live.sock";
     auto write=[&](const std::string& contents){int fd=open(path.c_str(),O_WRONLY|O_CREAT|O_TRUNC,0600);assert(fd>=0);
@@ -350,7 +373,7 @@ static void TestSceneEnvironment() {
     bad=good;bad["scene"]={{"dof_radius",2}};
     Command(controller,"import_project",{{"project",bad}});
     assert(State(controller)["project"]==good);
-    char temporary[]="/tmp/cs2-scene-project-XXXXXX";char* directory=mkdtemp(temporary);assert(directory);
+    auto temporary=TestPattern("cs2-scene-project-XXXXXX");char* directory=mkdtemp(temporary.data());assert(directory);
     const std::string filename=std::string(directory)+"/scene.json";setenv("CS2_CAMERA_PROJECT",filename.c_str(),1);
     Command(controller,"save_project");
     const std::string libraryPath=State(controller)["project_storage"]["path"].get<std::string>();
@@ -471,8 +494,8 @@ static void TestScenePostprocessGates() {
 }
 
 static void TestAppearanceDemoRefreshPreservesEditor() {
-    char pattern[]="/tmp/cs2-controller-refresh-XXXXXX";
-    const char* folder=mkdtemp(pattern);assert(folder);
+    auto pattern=TestPattern("cs2-controller-refresh-XXXXXX");
+    const char* folder=mkdtemp(pattern.data());assert(folder);
     const std::string path=std::string(folder)+"/input.dem";
     int file=open(path.c_str(),O_WRONLY|O_CREAT|O_EXCL,0600);assert(file>=0);
     assert(write(file,"demo",4)==4);close(file);
@@ -743,7 +766,7 @@ static void TestSafeExitRequest() {
 
 static void TestDemoPlaybackLimits() {
     const char* temporary=std::getenv("CS2_PREF_TEST_ROOT");
-    std::string pattern=std::string(temporary?temporary:"/tmp")+"/cs2-demo-limits-XXXXXX";
+    std::string pattern=temporary?std::string(temporary)+"/cs2-demo-limits-XXXXXX":TestPattern("cs2-demo-limits-XXXXXX");
     std::vector<char> directory(pattern.begin(),pattern.end());directory.push_back(0);assert(mkdtemp(directory.data()));
     const std::string path=std::string(directory.data())+"/fixture.dem";
     const int fd=open(path.c_str(),O_WRONLY|O_CREAT|O_EXCL,0600);assert(fd>=0);assert(write(fd,"demo",4)==4);close(fd);
@@ -871,6 +894,7 @@ int main() {
     TestTinyPreviewDoesNotResumeAfterOut();
     TestGuardedCameraMutation();
     TestValueCurves();
+    TestLargeProjectIdentityValidation();
     TestEditorPreferences();
     TestCombatSceneEnvironment();
     TestSceneEnvironment();
@@ -914,8 +938,8 @@ int main() {
     assert(State(controller)["project"]["keys"].size()==5);
     Command(controller,"undo"); assert(State(controller)["project"]["keys"].size()==2);
     Command(controller,"redo"); assert(State(controller)["project"]["keys"].size()==5);
-    char temporary[]="/tmp/cs2-live-project-XXXXXX";
-    char* directory=mkdtemp(temporary); assert(directory);
+    auto temporary=TestPattern("cs2-live-project-XXXXXX");
+    char* directory=mkdtemp(temporary.data()); assert(directory);
     const std::string filename=std::string(directory)+"/scene.json";
     setenv("CS2_CAMERA_PROJECT",filename.c_str(),1);
     Command(controller,"set_project",{{"interpolation","bezier"},{"rotation_interpolation","bezier"},{"fov_interpolation","bezier"}});

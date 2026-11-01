@@ -289,9 +289,10 @@ class NativeClient:
         path = self.socket_path or os.environ.get("CS2_CAMERA_SOCKET") or session_descriptor()["socket"]
         request_id = uuid.uuid4().hex
         payload = json.dumps({"id": request_id, "method": method, "params": params or {}},
-                             allow_nan=False, separators=(",", ":")).encode() + b"\n"
+                             ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode() + b"\n"
         if len(payload) > MAX_MESSAGE:
             raise LiveError("Camera request exceeds 1 MiB")
+        submitted = acknowledged = False
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
                 connection.settimeout(self.timeout)
@@ -300,6 +301,7 @@ class NativeClient:
                     _, peer_uid, _ = struct.unpack("3i", connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
                     if peer_uid != os.getuid():
                         raise LiveError("Camera socket belongs to another user")
+                submitted = True
                 connection.sendall(payload)
                 response = bytearray()
                 while b"\n" not in response:
@@ -313,12 +315,18 @@ class NativeClient:
             if not isinstance(result, dict) or result.get("id") != request_id:
                 raise LiveError("Native editor response does not match the request")
             if "error" in result:
+                acknowledged = True
                 error = result["error"]
                 raise LiveError(error.get("message", str(error)) if isinstance(error, dict) else str(error))
             if "result" not in result:
                 raise LiveError("Native editor returned an invalid response")
+            acknowledged = True
             return result["result"]
-        except (OSError, ValueError) as error:
+        except (OSError, ValueError, LiveError) as error:
+            if submitted and not acknowledged and method not in {"get_state", "ping", "export_project"}:
+                raise LiveError(f"{error}; command outcome is unknown until get_state confirms it; do not retry blindly") from error
+            if isinstance(error, LiveError):
+                raise
             raise LiveError(f"Cannot contact the live editor at {path}: {error}") from error
 
 
@@ -1121,7 +1129,9 @@ def graphical_launcher(args) -> int:
         nonlocal exporting
         exporting = False
         dialog.complete(outcome)
-        message = "Export complete" if outcome.get("plan") else outcome.get("error", "Export stopped")
+        plan = outcome.get("plan") or {}
+        completed = plan.get("status") == "done" and not plan.get("error") and not outcome.get("error") and not outcome.get("cancelled")
+        message = "Export complete" if completed else outcome.get("error") or plan.get("error") or "Export stopped"
         log_box.appendPlainText(message)
         session_status.setText(message)
         if options.reopen and outcome.get("stopped") and outcome.get("snapshot") and not closing:

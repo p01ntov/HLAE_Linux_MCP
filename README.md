@@ -1,3 +1,34 @@
+# CS2 Camera Studio 0.1.14 — editing and export workflow
+
+This local update adds reusable export profiles and recent-export settings,
+stable multi-key selection and group retiming, and searchable saved projects.
+It also fixes queued native commands that could execute after a client timeout,
+Unicode project restoration and Escape during active export.
+
+- **Export:** save a named profile, restore the last settings, or use settings
+  from recent exports. Profiles do not change your destination or current
+  composition/region. History distinguishes completed, failed and cancelled jobs.
+- **Camera timeline:** Ctrl-click selects multiple linked keys; drag a marquee
+  in empty lanes or move selected keys together. Shift still bypasses snapping.
+  A group retime commits once and is undone once; Escape cancels the draft.
+  Fit selection and previous/next key navigation use the current timeline.
+  Inspector edits and Delete continue to affect the primary key only.
+- **Projects (Ctrl+O):** search title, ID or demo filename, filter compatible
+  projects, and sort by recent use or name. Selection tracks the project ID;
+  a filtered or missing entry cannot be opened accidentally.
+
+The SourceMVM comparison, code-review scope and verification limits are in
+[the 0.1.14 review notes](docs/review-0.1.14.md). Its workflows informed these
+original implementations. Windows rendering effects were not silently enabled
+as Linux features.
+
+The editable source and resulting AppImage for this pass live entirely under
+`/mnt/ssd/CodexWorks/CS2CameraStudio`; a local baseline commit is retained for
+review. The package is a candidate until live CS2 behavior is verified on the
+current game build.
+
+---
+
 # CS2 Camera Studio — Linux prototype
 
 ## Live Camera Studio (Linux prototype)

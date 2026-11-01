@@ -14,7 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 import wave
 
-from cs2_mvp.export_ui import ExportOptions, describe_export, perform_export, restore_export_snapshot, save_export_snapshot
+from cs2_mvp.export_ui import ExportOptions, create_export_dialog, describe_export, perform_export, restore_export_snapshot, save_export_snapshot
 from cs2_mvp.render import RenderCancelled, _run_process, finish_capture
 
 
@@ -48,6 +48,192 @@ class ExportTests(unittest.TestCase):
         self.stable_patch = patch("cs2_mvp.export_ui._RESTORE_STABLE_SECONDS", 0)
         self.stable_patch.start()
         self.addCleanup(self.stable_patch.stop)
+        storage = tempfile.TemporaryDirectory()
+        self.addCleanup(storage.cleanup)
+        configuration = patch.dict(os.environ, {"CS2_CAMERA_EXPORT_PRESETS": str(Path(storage.name)/"exports.json")})
+        configuration.start()
+        self.addCleanup(configuration.stop)
+
+    @unittest.skipUnless(importlib.util.find_spec("PySide6"), "Qt runtime required")
+    def test_escape_cancels_active_export_without_hiding_its_progress(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6 import QtCore, QtGui, QtWidgets
+        app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        started = []
+        dialog = create_export_dialog(None, PROJECT, start_export=lambda *args: started.append(args))
+        self.addCleanup(dialog.deleteLater)
+        dialog.show()
+        app.processEvents()
+        dialog.begin()
+        app.sendEvent(dialog, QtGui.QKeyEvent(QtCore.QEvent.Type.KeyPress,
+            QtCore.Qt.Key.Key_Escape, QtCore.Qt.KeyboardModifier.NoModifier))
+        app.processEvents()
+        self.assertEqual(len(started), 1)
+        self.assertTrue(dialog.isVisible())
+        self.assertTrue(dialog.busy)
+        self.assertTrue(dialog.cancel_event.is_set())
+        self.assertFalse(dialog.cancel_button.isEnabled())
+        dialog.complete({"cancelled": True, "error": "Export cancelled"})
+        app.sendEvent(dialog, QtGui.QKeyEvent(QtCore.QEvent.Type.KeyPress,
+            QtCore.Qt.Key.Key_Escape, QtCore.Qt.KeyboardModifier.NoModifier))
+        app.processEvents()
+        self.assertFalse(dialog.isVisible())
+
+    @unittest.skipUnless(importlib.util.find_spec("PySide6"), "Qt runtime required")
+    def test_profiles_and_history_reuse_keep_destination_and_current_range(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6 import QtWidgets
+        from cs2_mvp.export_presets import append_history, make_history_record, save_last_used, save_preset, settings_from_options
+        app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        output = Path(os.environ["CS2_CAMERA_EXPORT_PRESETS"]).with_name("prior.mp4")
+        options = ExportOptions(output, width=1080, height=1920, capture_fps=240, fps=30, slow_motion=True, audio=False)
+        settings = settings_from_options(options)
+        save_last_used(settings)
+        save_preset("Portrait slow motion", settings)
+        append_history(make_history_record(options, {"cancelled":True, "error":"Cancelled by user"}, project_name="Prior shot"))
+        started = []
+        current = {**PROJECT, "render_range":{"mode":"region", "in":0.02, "out":0.1}}
+        dialog = create_export_dialog(None, current, start_export=lambda *args: started.append(args))
+        self.addCleanup(dialog.deleteLater)
+        self.assertEqual((dialog.options().width, dialog.options().height, dialog.options().capture_fps), (1080,1920,240))
+        dialog.destination.setText(str(output.with_name("chosen.mp4")))
+        dialog.scope.setCurrentIndex(0)
+        dialog.capture_fps.setValue(120)
+        dialog.preset.setCurrentIndex(dialog.preset.findData("Portrait slow motion"))
+        dialog.select_preset()
+        self.assertEqual(dialog.options().capture_fps, 240)
+        self.assertEqual(dialog.options().output, output.with_name("chosen.mp4"))
+        self.assertEqual(dialog.options().scope, "composition")
+        dialog.capture_fps.setValue(120)
+        self.assertIsNone(dialog.preset.currentData())
+        dialog.reuse_history()
+        self.assertEqual(dialog.options().capture_fps, 240)
+        self.assertEqual(dialog.options().output, output.with_name("chosen.mp4"))
+        self.assertEqual(dialog.options().scope, "composition")
+        self.assertIn("Cancelled", dialog.history.currentText())
+        self.assertIn("Cancelled by user", dialog.history_details.text())
+        self.assertEqual(started, [])
+        self.assertFalse(output.exists())
+        app.processEvents()
+
+    @unittest.skipUnless(importlib.util.find_spec("PySide6"), "Qt runtime required")
+    def test_failed_plan_does_not_show_completed_status_or_full_progress(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6 import QtWidgets
+        app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        dialog = create_export_dialog(None, PROJECT, start_export=lambda *args: None)
+        self.addCleanup(dialog.deleteLater)
+        dialog.complete({"plan":{"status":"failed", "error":"Encoder failed", "output":"/uncreated.mp4"}})
+        self.assertEqual(dialog.progress.value(), 0)
+        self.assertEqual(dialog.status.text(), "Encoder failed")
+        app.processEvents()
+
+    @unittest.skipUnless(importlib.util.find_spec("PySide6"), "Qt runtime required")
+    def test_corrupt_profile_store_does_not_prevent_dialog_or_overwrite_original(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6 import QtWidgets
+        app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        path = Path(os.environ["CS2_CAMERA_EXPORT_PRESETS"])
+        path.write_text('{"version":99}')
+        dialog = create_export_dialog(None, PROJECT, start_export=lambda *args: None)
+        self.addCleanup(dialog.deleteLater)
+        self.assertFalse(dialog.store_status.isHidden())
+        self.assertTrue(dialog.render_button.isEnabled())
+        self.assertEqual(path.read_text(), '{"version":99}')
+        app.processEvents()
+
+    @unittest.skipUnless(importlib.util.find_spec("PySide6") and hasattr(time, "tzset"), "Qt and POSIX timezone required")
+    def test_history_at_utc_date_bound_does_not_block_dialog_or_completion(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6 import QtWidgets
+        from cs2_mvp.export_presets import append_history, make_history_record
+        app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        output = Path(os.environ["CS2_CAMERA_EXPORT_PRESETS"]).with_name("out.mp4")
+        append_history(make_history_record(ExportOptions(output), {"error": "Old job"},
+            finished_at="9999-12-31T23:59:59Z"))
+        try:
+            with patch.dict(os.environ, {"TZ": "Etc/GMT-3"}):
+                time.tzset()
+                dialog = create_export_dialog(None, PROJECT, start_export=lambda *args: None)
+                self.addCleanup(dialog.deleteLater)
+                self.assertIn("31 Dec 23:59 UTC", dialog.history.currentText())
+                dialog.begin()
+                dialog.complete({"plan": {"status": "done", "output": str(output)}})
+                self.assertFalse(dialog.busy)
+                self.assertEqual(dialog.progress.value(), 1)
+                self.assertIn("Export complete", dialog.status.text())
+                app.processEvents()
+        finally:
+            time.tzset()
+
+    @unittest.skipUnless(importlib.util.find_spec("PySide6"), "Qt runtime required")
+    def test_two_export_dialogs_cannot_replace_or_delete_an_unseen_preset(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6 import QtWidgets
+        from cs2_mvp.export_presets import load_export_store, save_preset
+        app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        first = create_export_dialog(None, PROJECT, start_export=lambda *args: None)
+        stale = create_export_dialog(None, PROJECT, start_export=lambda *args: None)
+        self.addCleanup(first.deleteLater)
+        self.addCleanup(stale.deleteLater)
+        first.crf.setValue(15)
+        stale.crf.setValue(25)
+        with patch.object(QtWidgets.QInputDialog, "getText", return_value=("Master", True)), \
+             patch.object(QtWidgets.QMessageBox, "question", return_value=QtWidgets.QMessageBox.StandardButton.No) as question:
+            first.save_named_preset()
+            stale.save_named_preset()
+            self.assertEqual(load_export_store()["presets"][0]["settings"]["crf"], 15)
+            self.assertIn("another window", stale.store_status.text())
+            self.assertEqual(stale.store["presets"][0]["settings"]["crf"], 15)
+            question.assert_not_called()
+            stale.save_named_preset()
+            question.assert_called_once()
+            self.assertEqual(load_export_store()["presets"][0]["settings"]["crf"], 15)
+        # A confirmation may stay open while another window replaces the same
+        # preset. Even Yes only applies to the version the user actually saw.
+        def update_during_confirmation(*args):
+            save_preset("Master", {"crf": 35})
+            return QtWidgets.QMessageBox.StandardButton.Yes
+        with patch.object(QtWidgets.QInputDialog, "getText", return_value=("Master", True)), \
+             patch.object(QtWidgets.QMessageBox, "question", side_effect=update_during_confirmation):
+            stale.save_named_preset()
+        self.assertEqual(load_export_store()["presets"][0]["settings"]["crf"], 35)
+        first.preset.setCurrentIndex(first.preset.findData("Master"))
+        with patch.object(QtWidgets.QMessageBox, "question", return_value=QtWidgets.QMessageBox.StandardButton.Yes):
+            first.delete_named_preset()
+        self.assertEqual(load_export_store()["presets"][0]["settings"]["crf"], 35)
+        self.assertIn("another window", first.store_status.text())
+        app.processEvents()
+
+    def test_export_worker_records_outcome_and_remembers_only_reusable_settings(self):
+        from cs2_mvp.export_presets import load_export_store
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            options = ExportOptions(root/"out.mp4", width=1280, height=720, audio=False)
+            outcome = perform_export(options, demo=root/"match.dem", game_dir=None, client=Client(),
+                stop_session=lambda: None, wait_session=lambda: None, directory=root/"saved",
+                render=lambda *args, **kwargs: {"status":"done", "output":str(options.output), "start_tick":1000,
+                    "end_tick":1008, "expected_duration":.125, "media":{"duration":.125,"frames":8}})
+        store = load_export_store()
+        self.assertIsNone(outcome["error"])
+        self.assertEqual(store["last_used"]["width"], 1280)
+        self.assertNotIn("output", store["last_used"])
+        self.assertNotIn("scope", store["last_used"])
+        self.assertEqual(store["history"][0]["status"], "success")
+        self.assertEqual(store["history"][0]["frames"], 8)
+        self.assertEqual(store["history"][0]["project_name"], PROJECT["name"])
+
+    def test_history_write_failure_does_not_turn_completed_export_into_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            options = ExportOptions(root/"out.mp4")
+            with patch("cs2_mvp.export_presets.append_history", side_effect=OSError("Read-only configuration")):
+                outcome = perform_export(options, demo=root/"match.dem", game_dir=None, client=Client(),
+                    stop_session=lambda:None, wait_session=lambda:None, directory=root/"saved",
+                    render=lambda *args, **kwargs:{"status":"done", "output":str(options.output)})
+        self.assertIsNone(outcome["error"])
+        self.assertEqual(outcome["plan"]["status"], "done")
+        self.assertIn("Read-only", outcome["settings_warning"])
 
     @unittest.skipUnless(importlib.util.find_spec("PySide6"), "Qt runtime required")
     def test_offscreen_launcher_automatically_lists_selects_and_refreshes_downloaded_demos(self):
@@ -59,6 +245,14 @@ class ExportTests(unittest.TestCase):
     @unittest.skipUnless(importlib.util.find_spec("PySide6"), "Qt runtime required")
     def test_offscreen_launcher_native_export_request_capture_and_reopen(self):
         environment = dict(os.environ, QT_QPA_PLATFORM="offscreen")
+        result = subprocess.run([sys.executable, str(Path(__file__).with_name("gui_export_probe.py"))],
+                                capture_output=True, text=True, env=environment, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("EXPORT_GUI_LIFECYCLE_PASS", result.stdout)
+
+    @unittest.skipUnless(importlib.util.find_spec("PySide6"), "Qt runtime required")
+    def test_offscreen_launcher_keeps_failed_plan_status_while_restoring_session(self):
+        environment = dict(os.environ, QT_QPA_PLATFORM="offscreen", CS2_CAMERA_PROBE_FAILED_PLAN="1")
         result = subprocess.run([sys.executable, str(Path(__file__).with_name("gui_export_probe.py"))],
                                 capture_output=True, text=True, env=environment, timeout=15)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

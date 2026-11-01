@@ -1,5 +1,6 @@
 #include "../overlay_capture.h"
 #include <cassert>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -31,13 +32,13 @@ int main() {
     assert(recorded[1].oldLayout==VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL && recorded[1].newLayout==VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
     assert(recorded[0].srcAccessMask==VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT && recorded[0].dstAccessMask==VK_ACCESS_TRANSFER_READ_BIT);
     assert(recorded[1].srcAccessMask==VK_ACCESS_TRANSFER_READ_BIT && !recorded[1].dstAccessMask);
-    char directory[] = "/tmp/cs2-overlay-capture-XXXXXX";
-    assert(mkdtemp(directory));
-    setenv("CS2_CAMERA_OVERLAY_CAPTURE_DIR", directory, 1);
+    std::string directory = (std::filesystem::temp_directory_path() / "cs2-overlay-capture-XXXXXX").string();
+    assert(mkdtemp(directory.data()));
+    setenv("CS2_CAMERA_OVERLAY_CAPTURE_DIR", directory.c_str(), 1);
     const std::string root = directory;
-    assert(!chmod(directory, 0777));
+    assert(!chmod(directory.c_str(), 0777));
     { Probe rejected; assert(!rejected.Requested({})); assert(!rejected.Error().empty()); }
-    assert(!chmod(directory, 0700));
+    assert(!chmod(directory.c_str(), 0700));
     assert(!mkfifo((root + "/request").c_str(), 0600));
     { Probe rejected; assert(!rejected.Requested({})); assert(rejected.Error().empty()); }
     assert(!unlink((root + "/request").c_str()));
@@ -176,6 +177,6 @@ int main() {
     unlink((root + "/request").c_str()); unlink((root + "/no_blur").c_str());
     unlink((root + "/open_shot").c_str());unlink((root + "/open_map").c_str());
     unlink((root + "/open_curves").c_str());unlink((root + "/open_timeline").c_str());
-    unlink((root + "/open_settings").c_str());unlink((root + "/open_curve_menu").c_str());assert(!rmdir(directory));
+    unlink((root + "/open_settings").c_str());unlink((root + "/open_curve_menu").c_str());assert(!rmdir(directory.c_str()));
     std::cout << "One-shot after-render GPU pixels, clipping, orientation, same-frame metadata, BGRA and disabled path passed\n";
 }

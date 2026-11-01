@@ -417,7 +417,7 @@ class Server:
                 self.initialized = True
                 result = {"protocolVersion": version if version in SUPPORTED_PROTOCOLS else PROTOCOL_VERSION,
                           "capabilities": {"tools": {"listChanged": False}, "resources": {"subscribe": False, "listChanged": False}},
-                          "serverInfo": {"name": "cs2-camera-studio", "version": "0.1.13"},
+                          "serverInfo": {"name": "cs2-camera-studio", "version": "0.1.14"},
                           "instructions": "Read resource cs2-camera://guides/agent first for the evidence-to-camera workflow. Offline cs2_demo_* tools inspect local .dem files and find real event ticks without launching CS2; pass demo or use the active launcher demo. Never invent kills, ticks, player positions or supported scene effects. Camera tools connect to an already running local CS2 -insecure demo session; read get_state hook health and map_status before editing. Mandatory 3D geometry preflight rejects spatial edits when collision coverage is incomplete; static_clear is not permission when complete=false. validate_camera_path diagnoses real indexed geometry without changing state. Never bypass a rejection by another native/console channel. Collision diagnostics do not verify rendered visibility or full frustum. Shared project edits support in-game history; MCP undo/redo is unavailable until target history can be checked. No online play or arbitrary engine commands."}
             elif method == "ping":
                 result = {}

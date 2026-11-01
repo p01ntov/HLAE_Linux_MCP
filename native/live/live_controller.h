@@ -21,6 +21,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 #include <cerrno>
 #include <cstring>
@@ -221,12 +222,13 @@ inline void Normalize(Project& project) {
     if(project.fovInterpolation!="linear" && project.fovInterpolation!="bezier")throw std::invalid_argument("fov_interpolation must be linear or bezier");
     if (project.keys.size()>4096) throw std::invalid_argument("project supports at most 4096 keys");
     std::sort(project.keys.begin(),project.keys.end(),[](const Key& a,const Key& b){return a.time<b.time;});
+    std::unordered_set<std::string> ids;ids.reserve(project.keys.size());
     for (std::size_t i=0;i<project.keys.size();++i) {
         Validate(project.keys[i].pose);
         ValidateKeyCurves(project.keys[i]);
         if (project.keys[i].time>project.duration) throw std::invalid_argument("key exceeds project duration");
         if (i && project.keys[i].time-project.keys[i-1].time<0.000001) throw std::invalid_argument("keys need distinct times");
-        for (std::size_t j=0;j<i;++j) if (project.keys[i].id==project.keys[j].id) throw std::invalid_argument("duplicate key id");
+        if(!ids.insert(project.keys[i].id).second) throw std::invalid_argument("duplicate key id");
     }
     project.unwrappedRotations.clear();project.unwrappedRotations.reserve(project.keys.size());
     for(const auto& key:project.keys) {
@@ -579,7 +581,13 @@ public:
         { std::lock_guard<std::mutex> lock(queueMutex_);
           for (int i=0;i<64 && !queue_.empty();++i) { ready.push_back(queue_.front()); queue_.pop_front(); } }
         for (const auto& request:ready) {
+            const auto cancellation=QueuedCancellation(*request);
+            if(!cancellation.empty()){CancelQueued(request,cancellation);continue;}
             unsigned queued=0;if(!request->phase.compare_exchange_strong(queued,1))continue;
+            // Recheck after claiming the command, in case this thread was
+            // descheduled between the deadline test and the CAS.
+            const auto claimedCancellation=QueuedCancellation(*request);
+            if(!claimedCancellation.empty()){Resolve(request,Error(request->input,claimedCancellation));continue;}
             commandProcessed=true;
             try {
                 if(!cosmeticsRefreshed && request->input.at("method")!="get_state") {
@@ -645,14 +653,42 @@ public:
     }
 
 private:
-    struct Request { Json input; std::promise<Json> reply; std::atomic<unsigned> phase{0}; }; // queued/running/completed/cancelled
+    struct Request {
+        Json input;std::promise<Json> reply;std::atomic<unsigned> phase{0}; // queued/running/completed/cancelled
+        Clock::time_point startDeadline=Clock::now()+std::chrono::seconds(2);
+        // Keep a separate descriptor until the queued request retires. The
+        // socket worker may close/reuse its descriptor while FRAME_START checks
+        // whether this caller is still connected.
+        int peer=-1;
+        ~Request(){if(peer>=0)close(peer);}
+    };
     static Json Error(const Json& input,const std::string& message) {
         return {{"id",input.is_object()?input.value("id",Json(nullptr)):Json(nullptr)},{"error",{{"message",message}}}};
     }
     static void Resolve(const std::shared_ptr<Request>& request,Json value) { try {request->reply.set_value(std::move(value));request->phase=2;} catch (const std::future_error&) {} }
-    std::shared_ptr<Request> Queue(Json input) {
+    static std::string QueuedCancellation(const Request& request) {
+        if(Clock::now()>=request.startDeadline)
+            return "game thread did not service command within 2 seconds; cancelled before execution";
+        if(request.peer>=0) {
+            pollfd peer{request.peer,POLLIN,0};
+            // POLLHUP observes a fully disconnected peer. EOF/POLLRDHUP alone
+            // also occurs for a valid caller that only closed its write half.
+            if(poll(&peer,1,0)>0 && (peer.revents&(POLLHUP|POLLERR|POLLNVAL)))
+                return "caller disconnected; cancelled before execution";
+        }
+        return {};
+    }
+    static bool CancelQueued(const std::shared_ptr<Request>& request,const std::string& reason) {
+        unsigned queued=0;if(!request->phase.compare_exchange_strong(queued,3))return false;
+        Resolve(request,Error(request->input,reason));return true;
+    }
+    std::shared_ptr<Request> Queue(Json input,int peer=-1) {
         if (!input.is_object() || !input.contains("method") || !input.at("method").is_string()) throw std::invalid_argument("request requires method");
         auto request=std::make_shared<Request>(); request->input=std::move(input);
+        if(peer>=0) {
+            request->peer=fcntl(peer,F_DUPFD_CLOEXEC,0);
+            if(request->peer<0)throw std::runtime_error("cannot retain command connection");
+        }
         std::lock_guard<std::mutex> lock(queueMutex_);
         if (queue_.size()>=256) throw std::runtime_error("live command queue is full");
         queue_.push_back(request); return request;
@@ -1226,15 +1262,21 @@ private:
                 if(input.value("method",std::string())=="get_state") response={{"id",input.value("id",Json(nullptr))},{"result",Snapshot()}};
                 else if(input.value("method",std::string())=="ping") response={{"id",input.value("id",Json(nullptr))},{"result",{{"pong",true},{"abi",Abi}}}};
                 else {
-                    auto request=Queue(input); auto future=request->reply.get_future();
+                    auto request=Queue(input,client); auto future=request->reply.get_future();
                     const auto method=input.at("method").get<std::string>();
                     const bool appearance=method=="apply_appearance_pack" || method=="reset_appearance" || method=="probe_appearance_pack" || method=="set_player_cosmetics" || method=="reset_player_cosmetics" || method=="set_team_palette" || method=="reset_team_palette" || method=="set_player_weapon_paint" || method=="reset_player_weapon_paint" || method=="set_player_gloves" || method=="reset_player_gloves";
                     const auto expires=Clock::now()+std::chrono::seconds(appearance?30:2);
-                    while(running_ && Clock::now()<expires && future.wait_for(std::chrono::milliseconds(30))!=std::future_status::ready) {}
+                    while(running_ && Clock::now()<expires && future.wait_for(std::chrono::milliseconds(30))!=std::future_status::ready) {
+                        // Long appearance operations may run for 30 seconds,
+                        // but no command may begin after its caller timed out.
+                        if(request->phase.load()==0) {
+                            const auto reason=QueuedCancellation(*request);
+                            if(!reason.empty())CancelQueued(request,reason);
+                        }
+                    }
                     if(future.wait_for(std::chrono::milliseconds(0))!=std::future_status::ready) {
-                        unsigned queued=0;
-                        if(request->phase.compare_exchange_strong(queued,3))throw std::runtime_error(appearance?"engine command was cancelled before execution after 30 seconds":"game thread did not service command within 2 seconds; cancelled before execution");
-                        throw std::runtime_error("engine operation already started; outcome is unknown until get_state confirms it; do not retry blindly");
+                        if(!CancelQueued(request,running_?"game thread did not service command within 2 seconds; cancelled before execution":"live session stopped; cancelled before execution"))
+                            throw std::runtime_error("engine operation already started; outcome is unknown until get_state confirms it; do not retry blindly");
                     }
                     response=future.get();
                 }

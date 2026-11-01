@@ -6,7 +6,7 @@
 using namespace cs2_live;
 struct DemoFile {
     std::string path;
-    DemoFile(){char name[]="/tmp/cs2-demo-timeline-XXXXXX";int fd=mkstemp(name);assert(fd>=0);path=name;assert(write(fd,"fixture",7)==7);close(fd);}
+    DemoFile(){std::string name=(std::filesystem::temp_directory_path()/"cs2-demo-timeline-XXXXXX").string();int fd=mkstemp(name.data());assert(fd>=0);path=name;assert(write(fd,"fixture",7)==7);close(fd);}
     ~DemoFile(){unlink(path.c_str());}
     Json Metadata()const {
         struct stat info{};assert(!stat(path.c_str(),&info));

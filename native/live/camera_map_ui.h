@@ -17,7 +17,7 @@ class CameraMapUi {
   void SetMapPreview(const Json& preview){preview_=preview;}
   void ResetGesture(){Cancel();}
   void Draw(const Json& state,const Send& send,const std::string& selected,
-            const std::function<void(const std::string&)>& select,float scale,const std::function<void()>& backdrop={},bool embedded=false) {
+            const std::function<void(const std::string&,bool)>& select,float scale,const std::function<void()>& backdrop={},bool embedded=false) {
     if(!visible){ResetGesture();return;}
     if(!embedded){
       const auto display=ImGui::GetIO().DisplaySize;
@@ -35,8 +35,8 @@ class CameraMapUi {
     const auto document=state.value("project_document_id",std::uint64_t(0));
     if(last_document_!=document){Cancel();fitted_=false;last_document_=document;}
     if(tangent_ && raw!=tangent_source_)Cancel();
-    if(!drag_id_.empty() && drag_id_!="@camera" && std::none_of(project.keys.begin(),project.keys.end(),[&](const auto& k){return k.id==drag_id_;}))Cancel();
-    if(!drag_id_.empty() && drag_id_!="@camera")for(const auto& key:project.keys)
+    if(!drag_id_.empty() && !drag_camera_ && std::none_of(project.keys.begin(),project.keys.end(),[&](const auto& k){return k.id==drag_id_;}))Cancel();
+    if(!drag_id_.empty() && !drag_camera_)for(const auto& key:project.keys)
       if(key.id==drag_id_ && key.pose.position!=drag_original_)Cancel();
     const auto& preview=state.contains("map_preview") && state.at("map_preview").is_object()?state.at("map_preview"):preview_;
     const auto& layers=preview.contains("layers")?preview.at("layers"):Empty();
@@ -131,7 +131,7 @@ class CameraMapUi {
       for(const auto& line:lines){if(++count>1000)break;if(line.is_array() && line.size()==4)draw->AddLine(point(line[0],line[1]),point(line[2],line[3]),IM_COL32(180,187,187,130),scale);}
     }
     if(tangent_&&!tangent_patch_.empty()){Json preview_project=raw;preview_project.update(tangent_patch_);project=cs2_live::ReadProject(preview_project);}
-    if(!tangent_&&!drag_id_.empty() && drag_id_!="@camera")for(auto& key:project.keys)if(key.id==drag_id_){key.pose.position[0]=drag_x_;key.pose.position[1]=drag_y_;}
+    if(!tangent_&&!drag_id_.empty() && !drag_camera_)for(auto& key:project.keys)if(key.id==drag_id_){key.pose.position[0]=drag_x_;key.pose.position[1]=drag_y_;}
     if(!project.keys.empty()){
       ImVec2 previous{};const int samples=std::min(2048,std::max(64,int(project.keys.size())*32));
       for(int i=0;i<=samples;++i){const auto p=cs2_live::Sample(project,project.duration*i/samples).position;const auto next=point(p[0],p[1]);if(i)draw->AddLine(previous,next,IM_COL32(220,207,151,230),2*scale);previous=next;}
@@ -146,7 +146,7 @@ class CameraMapUi {
         const auto& p=collision["position"];draw->AddCircle(point(p[0],p[1]),12*scale,IM_COL32(255,80,55,255),24,3*scale);
       }
     }
-    std::string nearest;double best=12*scale;cs2_live::Pose nearest_pose;int nearest_tangent=0;
+    std::string nearest;double best=12*scale;cs2_live::Pose nearest_pose;int nearest_tangent=0;bool nearest_camera=false;
     if(selected_index<project.keys.size()){
       const auto& key=project.keys[selected_index];const auto base=key.pose.position;
       for(bool incoming:{true,false}){if((incoming&&selected_index==0)||(!incoming&&selected_index+1==project.keys.size()))continue;
@@ -157,20 +157,20 @@ class CameraMapUi {
       }
     }
     auto handle=[&](const std::string& id,const cs2_live::Pose& pose,bool live,int number){
-      const auto p=point(pose.position[0],pose.position[1]);const bool chosen=id==selected || id==drag_id_;
+      const auto p=point(pose.position[0],pose.position[1]);const bool chosen=live?drag_camera_:(id==selected || (!drag_camera_&&id==drag_id_));
       const auto color=live?IM_COL32(110,205,220,255):chosen?IM_COL32(255,228,133,255):IM_COL32(225,225,215,230);
       draw->AddCircleFilled(p,(chosen?6.f:4.f)*scale,color);
 #ifdef IMGUI_ENABLE_TEST_ENGINE
       // Expose the actual drawn hit region to the same optional item hooks as
       // ImGui controls; tests never guess the map's pan/zoom or pixel layout.
-      const std::string label="##map_handle_"+id;
+      const std::string label=live?"##map_live_camera":"##map_handle_"+id;
       auto& g=*ImGui::GetCurrentContext();
       const auto handle_id=ImGui::GetID(label.c_str());
       IMGUI_TEST_ENGINE_ITEM_ADD(handle_id,ImRect(ImVec2(p.x-8*scale,p.y-8*scale),ImVec2(p.x+8*scale,p.y+8*scale)),nullptr);
       IMGUI_TEST_ENGINE_ITEM_INFO(handle_id,label.c_str(),0);
 #endif
       const double distance=std::hypot(mouse.x-p.x,mouse.y-p.y);
-      if(distance<best || (nearest_tangent&&distance==best)){best=distance;nearest=id;nearest_pose=pose;nearest_tangent=0;}
+      if(distance<best || (nearest_tangent&&distance==best)){best=distance;nearest=id;nearest_pose=pose;nearest_tangent=0;nearest_camera=live;}
       constexpr double radians=3.141592653589793/180.;const double yaw=pose.angles[1]*radians;
       draw->AddLine(p,ImVec2(p.x+float(std::cos(yaw))*16*scale,p.y-float(std::sin(yaw))*16*scale),color,scale);
       if(!live && labels){char label[32];std::snprintf(label,sizeof(label),"%02d",number);draw->AddText(ImVec2(p.x+7*scale,p.y-13*scale),color,label);}
@@ -179,14 +179,14 @@ class CameraMapUi {
     for(std::size_t i=0;i<project.keys.size();++i)handle(project.keys[i].id,project.keys[i].pose,false,int(i)+1);
     if(state.contains("camera")){
       auto camera=cs2_live::ReadPose(state.at("camera"));
-      if(drag_id_=="@camera"){camera.position[0]=drag_x_;camera.position[1]=drag_y_;}
+      if(drag_camera_){camera.position[0]=drag_x_;camera.position[1]=drag_y_;}
       handle("@camera",camera,true,0);
     }
     if(hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !nearest.empty()){
-      drag_id_=nearest;drag_original_=nearest_pose.position;drag_x_=drag_original_[0];drag_y_=drag_original_[1];drag_mouse_=mouse;moved_=false;
+      drag_id_=nearest;drag_camera_=nearest_camera;drag_original_=nearest_pose.position;drag_x_=drag_original_[0];drag_y_=drag_original_[1];drag_mouse_=mouse;moved_=false;
       tangent_=nearest_tangent;tangent_source_=raw;tangent_patch_=Json::object();tangent_mode_=ImGui::GetIO().KeyCtrl?2:mode_;
       if(tangent_)tangent_offset_=camera_curve::Offset(project,camera_curve::Index(project,nearest),0,tangent_==1);
-      if(select)select(nearest);
+      if(select)select(nearest,nearest_camera);
     }
     if(!drag_id_.empty()){
       if(ImGui::IsKeyPressed(ImGuiKey_Escape,false)){Cancel();ImGui::ClearActiveID();}
@@ -197,7 +197,7 @@ class CameraMapUi {
         else{drag_x_=std::clamp(drag_original_[0]+dx/zoom_,-1000000.,1000000.);drag_y_=std::clamp(drag_original_[1]-dy/zoom_,-1000000.,1000000.);}
       }else{
         if(tangent_){if(!tangent_patch_.empty()&&camera_curve::Changed(tangent_source_,tangent_patch_)&&send)send("set_project",tangent_patch_);}
-        else if(moved_ && send && (drag_x_!=drag_original_[0]||drag_y_!=drag_original_[1])){Json payload={{"position",{drag_x_,drag_y_,drag_original_[2]}}};if(drag_id_!="@camera")payload["id"]=drag_id_;send(drag_id_=="@camera"?"set_camera":"update_key",payload);}
+        else if(moved_ && send && (drag_x_!=drag_original_[0]||drag_y_!=drag_original_[1])){Json payload={{"position",{drag_x_,drag_y_,drag_original_[2]}}};if(!drag_camera_)payload["id"]=drag_id_;send(drag_camera_?"set_camera":"update_key",payload);}
         Cancel();
       }
     }
@@ -210,9 +210,9 @@ class CameraMapUi {
  private:
   static const Json& Empty(){static const Json empty=Json::object();return empty;}
   Json preview_=Json::object();
-  void Cancel(){drag_id_.clear();moved_=false;tangent_=0;tangent_patch_=Json::object();}
+  void Cancel(){drag_id_.clear();drag_camera_=false;moved_=false;tangent_=0;tangent_patch_=Json::object();}
   int tangent_=0,tangent_mode_=0,mode_=0;std::string mode_target_;Json tangent_source_,tangent_patch_;camera_curve::Vector tangent_offset_{};
-  bool fitted_=false,auto_layer_=true,moved_=false;int layer_=0;
+  bool fitted_=false,auto_layer_=true,moved_=false,drag_camera_=false;int layer_=0;
   double center_x_=0,center_y_=0,zoom_=1,drag_x_=0,drag_y_=0;
   std::uint64_t last_document_=std::numeric_limits<std::uint64_t>::max();
   std::string drag_id_;std::array<double,3> drag_original_{};ImVec2 drag_mouse_{};

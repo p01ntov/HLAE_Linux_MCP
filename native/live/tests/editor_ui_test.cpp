@@ -329,7 +329,7 @@ void CameraMapGestures(float height) {
   // The live camera can also move in XY without overwriting its lens/rotation.
   f.state["camera"]["position"]={395.6,-1700.,77.125};f.Step();
   const Json original_camera=f.state["camera"];
-  auto camera_point=f.Find("##map_handle_@camera",0,window).bounds.GetCenter();
+  auto camera_point=f.Find("##map_live_camera",0,window).bounds.GetCenter();
   f.commands.clear();f.Mouse(camera_point);ImGui::GetIO().AddMouseButtonEvent(0,true);f.Step();
   f.Mouse(ImVec2(camera_point.x+20*f.scale,camera_point.y+15*f.scale));f.Step();
   ImGui::GetIO().AddMouseButtonEvent(0,false);f.Step();
@@ -672,6 +672,52 @@ void WorkspaceNavigation(float height){
   f.commands.clear();f.Key(ImGuiKey_I);f.Key(ImGuiKey_O);Require(f.commands.empty(),"Demo context edited camera In/Out");
   f.Click("Camera",0,bar);f.Step();f.state["cursor"]=100.;f.Step();Require(f.DrawText().find("Outside shot +92.00 s")!=std::string::npos,"Outside-shot playhead was shown as in-range");
   Require(f.state["cursor"]==100.,"Displaying outside-shot time clamped native cursor");
+}
+
+void LiteralCameraKeyIdentity(float height){
+  Fixture f(height);constexpr const char* timeline="Camera timeline / composition";constexpr const char* map="Camera map / XY";
+  f.state["project"]["keys"][1]["id"]="@camera";
+  f.state["camera"]["position"]={395.6,-1700.,77.125};
+  cs2_live::ReadProject(f.state["project"]);f.Step();f.Tool("Timeline");
+  const auto camera=f.state["camera"];auto before=f.state["project"]["keys"];
+  auto point=f.Find("##composition_key_Position_@camera",0,timeline).bounds.GetCenter();
+  PointerDrag(f,point,ImVec2(point.x+36*f.scale,point.y));
+  Require(f.commands.size()==1&&f.commands[0].method=="set_project"&&f.state["project"]["keys"][1]["time"]>before[1]["time"],
+    "Literal @camera key was mistaken for the live camera in the timeline");
+  Require(f.state["camera"]==camera,"Timeline changed the live camera for a literal key ID");
+  f.commands.clear();f.Type("##fov","102");
+  Require(f.One("update_key","id")=="@camera"&&f.state["camera"]==camera,"Inspector did not preserve the literal selected key ID");
+  f.Tool("Map");before=f.state["project"]["keys"];
+  point=f.Find("##map_handle_@camera",0,map).bounds.GetCenter();
+  PointerDrag(f,point,ImVec2(point.x+24*f.scale,point.y-18*f.scale));
+  Require(f.One("update_key","id")=="@camera"&&f.state["project"]["keys"][1]["position"]!=before[1]["position"],
+    "Map key gesture did not address literal @camera key");
+  Require(f.state["camera"]==camera,"Map key gesture moved the live camera instead");
+  before=f.state["project"]["keys"];point=f.Find("##map_live_camera",0,map).bounds.GetCenter();
+  PointerDrag(f,point,ImVec2(point.x+22*f.scale,point.y+14*f.scale));
+  Require(f.commands.size()==1&&f.commands[0].method=="set_camera"&&f.state["camera"]!=camera&&f.state["project"]["keys"]==before,
+    "Live map handle was confused with a key carrying the same label");
+  Require(f.DrawText().find("Current world-space pose")!=std::string::npos,"Live map selection left the inspector on the literal key");
+  f.Tool("Curves");f.Click("##curve_key_@camera",0,"Camera curves / values");f.Step();f.Type("##fov","104");
+  Require(f.One("update_key","id")=="@camera", "Curve selection did not preserve literal @camera key identity");
+}
+
+void SuspendedViewportDrafts(){
+  for(const std::string reason:{"hidden","collapsed","tool","zero_viewport","small_viewport"}){
+    Fixture f;constexpr const char* timeline="Camera timeline / composition";f.Tool("Timeline");
+    const auto before=f.state["project"];const auto point=f.Find("##composition_key_Position_1",0,timeline).bounds.GetCenter();
+    f.Mouse(point);ImGui::GetIO().AddMouseButtonEvent(0,true);f.Step();f.Mouse(ImVec2(point.x+45,point.y));f.Step();Require(f.commands.empty(),"Timeline committed before suspension");
+    if(reason=="hidden")f.editor.visible=false;
+    else if(reason=="collapsed")f.state["editor_preferences"]["workspace_open"]=false;
+    else if(reason=="tool")f.state["editor_preferences"]["workspace_tool"]="map";
+    else ImGui::GetIO().DisplaySize=reason=="zero_viewport"?ImVec2(0,0):ImVec2(319,239);
+    f.Step();ImGui::GetIO().AddMouseButtonEvent(0,false);f.Step();f.Step();
+    f.editor.visible=true;f.state["editor_preferences"]["workspace_open"]=true;f.state["editor_preferences"]["workspace_tool"]="timeline";ImGui::GetIO().DisplaySize=ImVec2(1920,1080);f.Step();f.Step();
+    Require(f.commands.empty()&&f.state["project"]==before,reason+" restored an abandoned timeline gesture");
+  }
+  Fixture f;f.SelectKey();const auto before=f.state["project"];f.Click("##fov");ImGui::GetIO().AddInputCharactersUTF8("106");f.Step();
+  ImGui::GetIO().DisplaySize=ImVec2(0,0);f.Step();ImGui::GetIO().DisplaySize=ImVec2(1920,1080);f.Step();f.Key(ImGuiKey_Enter);f.Step();
+  Require(f.commands.empty()&&f.state["project"]==before,"Viewport restoration applied a hidden numeric draft");
 }
 
 void ContextualCapture(float height) {
@@ -1621,10 +1667,10 @@ void SavedProjectBrowser(float height) {
   f.Step();const auto project=f.state["project"];
   f.commands.clear();f.Click("Project",0,transport);f.Step();f.Choose("Load project");f.Step();
   Require(f.commands.size()==1 && f.commands[0].method=="refresh_project_library","Load menu bypassed the project browser or did not request an explicit scan");
-  f.Choose("Other demo shot B");f.Step();f.commands.clear();
+  f.Choose("Other demo shot B###project_row");f.Step();f.commands.clear();
   Require(f.DrawText().find("another recording")!=std::string::npos,"Wrong-demo project did not explain why it cannot open");
   f.Choose("Open selected project");Require(f.commands.empty(),"Browser allowed a mismatched recording to load");
-  f.Choose("Editable shot A");f.Step();f.Choose("Open selected project");
+  f.Choose("Editable shot A###project_row");f.Step();f.Choose("Open selected project");
   Require(f.commands.size()==1 && f.commands[0].method=="load_saved_project" && f.commands[0].arguments==Json{{"id","project-a"}},"Browser did not load the exact cached project id");
   Require(f.state["project"]==project,"Browsing projects rewrote current camera metadata");
   f.Step();f.commands.clear();
@@ -1636,6 +1682,84 @@ void SavedProjectBrowser(float height) {
   f.commands.clear();ImGui::GetIO().AddKeyEvent(ImGuiMod_Ctrl,true);ImGui::GetIO().AddKeyEvent(ImGuiMod_Shift,true);
   f.Key(ImGuiKey_S);ImGui::GetIO().AddKeyEvent(ImGuiMod_Shift,false);ImGui::GetIO().AddKeyEvent(ImGuiMod_Ctrl,false);f.Step();
   Require(f.commands.size()==1 && f.commands[0].method=="save_project_copy","Ctrl+Shift+S did not create a separate saved project");
+}
+
+void SavedProjectSearch(float height,float ui_scale=1) {
+  Fixture f(height);constexpr const char* browser="Camera projects";
+  f.state["editor_preferences"]["ui_scale"]=ui_scale;
+  // Duplicate titles and IDs containing ImGui's label delimiter must still
+  // address different files. Nanosecond ordering must not round through double.
+  f.state["project_library"]={{"directory","/projects/"+std::string(400,'x')},{"entries",Json::array({
+    {{"id","alpha###same"},{"title","Shared shot"},{"compatible",true},{"saved_at_ns",1700000000000000001LL},
+      {"demo",{{"path","/demos/ALPHA-MATCH.dem"}}},{"key_count",3},{"duration",5.25}},
+    {{"id","beta###same"},{"title","Shared shot"},{"compatible",true},{"saved_at_ns",1700000000000000002LL},
+      {"demo",{{"path","/demos/Beta.dem"}}},{"key_count",2},{"duration",5.0}},
+    {{"id","russian-id"},{"title","ЁЛКА НА МИРАЖЕ"},{"compatible",true},{"saved_at_ns",1},
+      {"warning","No recording metadata; opens with the current demo."},{"key_count",1},{"duration",4.0}},
+    {{"id","other-id"},{"title","Another recording"},{"compatible",false},{"saved_at_ns",0},
+      {"reason","This project belongs to another recording. Open its demo first."},{"key_count",2},{"duration",2.0}}})}};
+  f.state["project_storage"]={{"id","alpha###same"}};f.Step();
+  const Json original=f.state["project"];
+  ImGui::GetIO().AddKeyEvent(ImGuiMod_Ctrl,true);f.Key(ImGuiKey_O);ImGui::GetIO().AddKeyEvent(ImGuiMod_Ctrl,false);f.Step();
+  f.commands.clear();
+  auto item=[&](const std::string& id) {
+    auto* window=TestWindow("##saved_project_list");Require(window!=nullptr,"Saved project list missing");
+    const auto scope=ImHashData(id.data(),id.size(),window->GetID("##project_entry"));
+    const auto found=f.submitted.items.find(ImHashStr("###project_row",0,scope));
+    Require(found!=f.submitted.items.end(),"Saved project row missing: "+id);return found->second;
+  };
+  auto has=[&](const std::string& id) {
+    auto* window=TestWindow("##saved_project_list");if(!window)return false;
+    return f.submitted.items.count(ImHashStr("###project_row",0,ImHashData(id.data(),id.size(),window->GetID("##project_entry"))))!=0;
+  };
+  auto search=[&](const char* text) {
+    f.Click("##project_search",0,browser);
+    ImGui::GetIO().AddKeyEvent(ImGuiMod_Ctrl,true);f.Key(ImGuiKey_A);ImGui::GetIO().AddKeyEvent(ImGuiMod_Ctrl,false);f.Step();
+    ImGui::GetIO().AddInputCharactersUTF8(text);f.Step();
+    Require(f.commands.empty(),"Filtering projects emitted a bridge command");
+  };
+  auto clear=[&] {f.Click("Clear filters",0,browser);f.Step();};
+  Require(item("beta###same").bounds.Min.y<item("alpha###same").bounds.Min.y,"Recent order lost nanosecond precision");
+  const auto open=f.Find("Open selected project",0,browser).bounds;
+  Require(open.Min.y>=0 && open.Max.y<height,"Browser action is clipped at this screen size/scale");
+  const auto* window=TestWindow(browser);
+  Require(window && window->Pos.y>=0 && window->Pos.y+window->Size.y<=height,"Project browser exceeds the viewport");
+  search("BETA###SAME");
+  Require(!has("alpha###same") && has("beta###same"),"Project ID search did not fold ASCII case");
+  Require(f.DrawText().find("hidden by the filters")!=std::string::npos,"Hidden selection is not explained");
+  f.Click("Open selected project",0,browser);Require(f.commands.empty(),"Hidden selected project loaded");
+  clear();Require(f.DrawText().find("alpha###same.json")!=std::string::npos,"Clearing filters lost selection identity");
+  search("alpha-match.DEM");Require(has("alpha###same") && !has("beta###same"),"Demo filename search failed");
+  clear();search("ёлка на мираже");
+  Require(has("russian-id") && !has("alpha###same"),"Russian title search is case sensitive or lost Ё");
+  clear();search("not-present");
+  Require(f.DrawText().find("No projects match these filters")!=std::string::npos,"No-result search has no recovery message");
+  f.Click("Open selected project",0,browser);Require(f.commands.empty(),"Empty results allowed a stale load");
+  clear();f.ClickAt(item("other-id").bounds.GetCenter());f.Step();
+  Require(f.DrawText().find("another recording")!=std::string::npos,"Incompatible recording lost its explanation");
+  f.Click("Compatible only",0,browser);f.Step();
+  Require(!has("other-id") && has("russian-id"),"Compatible filter removed legacy projects or retained mismatched demos");
+  f.Click("Open selected project",0,browser);Require(f.commands.empty(),"Compatibility filter left the hidden selection actionable");
+  clear();f.ClickAt(item("beta###same").bounds.GetCenter());f.Step();
+  f.Click("##project_sort",0,browser);f.Step();f.Choose("Name");f.Step();
+  Require(item("alpha###same").bounds.Min.y<item("beta###same").bounds.Min.y,"Duplicate titles have unstable ID tie-breaking");
+  Require(f.DrawText().find("beta###same.json")!=std::string::npos,"Sorting reassigned selection by row position");
+  Require(f.commands.empty() && f.state["project"]==original,"Search/filter/sort changed the current project");
+  f.Click("Refresh projects",0,browser);
+  Require(f.commands.size()==1 && f.commands[0].method=="refresh_project_library","Refresh did not request one explicit scan");
+  f.commands.clear();std::reverse(f.state["project_library"]["entries"].begin(),f.state["project_library"]["entries"].end());
+  f.state["project_library"]["entries"][2]["title"]="Renamed shot";f.Step();
+  Require(f.DrawText().find("beta###same.json")!=std::string::npos,"Refresh/rename changed selection identity");
+  f.Click("Open selected project",0,browser);
+  Require(f.commands.size()==1 && f.commands[0].method=="load_saved_project" && f.commands[0].arguments==Json{{"id","beta###same"}},
+          "Duplicate title or ImGui delimiter caused the wrong project to load");
+  Require(f.state["project"]==original,"Opening the browser mutated camera keys");
+  f.state["project_storage"]["id"]="beta###same";f.Step();f.commands.clear();
+  ImGui::GetIO().AddKeyEvent(ImGuiMod_Ctrl,true);f.Key(ImGuiKey_O);ImGui::GetIO().AddKeyEvent(ImGuiMod_Ctrl,false);f.Step();
+  f.commands.clear();f.state["project_library"]["entries"].erase(2);f.Step();
+  Require(!has("beta###same"),"Removed project retained a stale browser row");
+  f.Click("Open selected project",0,browser);Require(f.commands.empty(),"Deleted selected project could still be opened after refresh");
+  Require(f.state["project"]==original,"Refreshing projects changed the open camera shot");
 }
 
 void SavedShotSelection() {
@@ -1768,6 +1892,7 @@ int main() {
     MapTangents(1080);MapTangents(720);ValueCurves(1080);ValueCurves(720);IndependentTiming();CurveDiagnosticLayout();TightCurveTimes(1080);TightCurveTimes(720);GuardedCurveProjectWrites();
     std::cout << "Editor settings and compact toolbar at 1080p / 720p\n" << std::flush;
     WorkspaceNavigation(1080);WorkspaceNavigation(720);WorkspaceNavigation(1440);
+    LiteralCameraKeyIdentity(1080);LiteralCameraKeyIdentity(720);SuspendedViewportDrafts();
     SafeExitUi(1080,1);SafeExitUi(720,1.5);SafeExitUi(1440,1.5);SafeExitCommitsActiveInput();
     ContextualCapture(1080);ContextualCapture(720);
     PlaybackTimeControls(1080,1);PlaybackTimeControls(720,1);PlaybackTimeControls(720,1.5);PlaybackTimeControls(1440,1.5);
@@ -1811,6 +1936,7 @@ int main() {
     DiagnosticShotLayout();
     std::cout << "Saved shot selection, confirmed import and session drafts\n" << std::flush;
     SavedProjectBrowser(1080);SavedProjectBrowser(720);
+    SavedProjectSearch(1080);SavedProjectSearch(720);SavedProjectSearch(720,1.5);
     SavedShotSelection();
     SavedShotLibraryLoading();
     std::cout << "PASS: numeric replacement, Enter/click-away, middle steps and bounds, "
